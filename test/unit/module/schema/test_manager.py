@@ -481,6 +481,32 @@ class TestManagerPatch(BaseTestCase):
         )
         self.assertEqual(raised.exception.exit_code, 1)
 
+    def test_excluded_types_are_per_region(self):
+        """An exclusion for one region leaves the type available elsewhere"""
+        rt = "AWS::EC2::VPC"
+        self.manager.patch(SchemaPatch([], [rt], {}), "us-east-1")
+
+        with self.assertRaises(ResourceNotFoundError):
+            self.manager.get_resource_schema("us-east-1", rt)
+        self.assertNotIn(rt, self.manager.get_resource_types("us-east-1"))
+
+        # untouched region
+        self.manager.get_resource_schema("us-east-2", rt)
+        self.assertIn(rt, self.manager.get_resource_types("us-east-2"))
+
+    def test_excluded_types_accumulate_per_region(self):
+        """Two patches for one region both apply; reset clears them"""
+        self.manager.patch(SchemaPatch([], ["AWS::EC2::VPC"], {}), "us-west-2")
+        self.manager.patch(SchemaPatch([], ["AWS::EC2::Subnet"], {}), "us-west-2")
+        types = self.manager.get_resource_types("us-west-2")
+        self.assertNotIn("AWS::EC2::VPC", types)
+        self.assertNotIn("AWS::EC2::Subnet", types)
+
+        self.manager.reset()
+        types = self.manager.get_resource_types("us-west-2")
+        self.assertIn("AWS::EC2::VPC", types)
+        self.assertIn("AWS::EC2::Subnet", types)
+
 
 class TestReadSchemaDate(BaseTestCase):
     """Test _read_schema_date"""

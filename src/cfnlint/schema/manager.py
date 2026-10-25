@@ -120,7 +120,8 @@ class ProviderSchemaManager:
         self._schemas: dict[str, dict[str, Schema]] = {}
         for region in REGIONS:
             self._schemas[region] = {}
-        self._removed_types: list[str] = []
+        # resource types excluded by an override spec, keyed by region
+        self._removed_types: dict[str, set[str]] = {}
         self._provider_schema_modules = {}
         self._sam_schema_module = None
         self.get_resource_schema.cache_clear()
@@ -263,7 +264,7 @@ class ProviderSchemaManager:
         if resource_type not in self._registry_schemas:
             resource_type = self._normalize_resource_type(resource_type)
 
-        if resource_type in self._removed_types:
+        if resource_type in self._removed_types.get(region, ()):
             raise ResourceNotFoundError(resource_type, region)
 
         if resource_type == "Module":
@@ -304,7 +305,9 @@ class ProviderSchemaManager:
 
         resource_types: list[str] = []
         resource_types.extend(
-            rt for rt in provider_types.keys() if rt not in self._removed_types
+            rt
+            for rt in provider_types.keys()
+            if rt not in self._removed_types.get(region, ())
         )
         resource_types.extend(list(self._registry_schemas.keys()))
 
@@ -517,10 +520,9 @@ class ProviderSchemaManager:
                 resource_types.remove(match)
 
         # Remove unsupported resources
-        removed_types = list(set(all_resource_types) - set(resource_types))
+        removed_types = set(all_resource_types) - set(resource_types)
         if removed_types:
-            for removed_type in removed_types:
-                self._removed_types.append(removed_type)
+            self._removed_types.setdefault(region, set()).update(removed_types)
             self.get_resource_schema.cache_clear()
             self.get_resource_types.cache_clear()
 
