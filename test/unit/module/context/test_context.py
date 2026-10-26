@@ -159,3 +159,17 @@ class TestModuleNames(unittest.TestCase):
             resources={"MyBucket": Resource({"Type": "AWS::S3::Bucket"})}
         )
         self.assertEqual(replaced.module_names, ())
+
+    def test_module_names_carried_when_resources_unchanged(self):
+        resources = _CountingResources(
+            {
+                "MyModule": Resource({"Type": "My::Organization::Custom::MODULE"}),
+            }
+        )
+        context = Context(resources=resources)
+        self.assertEqual(context.module_names, ("MyModule",))
+        self.assertEqual(resources.items_calls, 1)
+
+        evolved = context.evolve(regions=["us-west-2"])
+        self.assertEqual(evolved.module_names, ("MyModule",))
+        self.assertEqual(resources.items_calls, 1)

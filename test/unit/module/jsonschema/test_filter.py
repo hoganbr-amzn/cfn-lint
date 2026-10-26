@@ -248,3 +248,12 @@ def test_raw_pseudo_parameter_with_dynamic_references_disabled(template):
     assert len(results) == 1
     assert results[0][0] == "AWS::NoValue"
     assert results[0][1] == {"rawPseudoParameter": schema}
+
+
+def test_evolve_matches_init(filter):
+    evolved = filter.evolve(add_cfn_lint_keyword=False)
+
+    assert evolved == FunctionFilter(add_cfn_lint_keyword=False)
+    assert filter.add_cfn_lint_keyword is True
+    with pytest.raises(TypeError):
+        filter.evolve(not_a_field=True)

@@ -340,11 +340,26 @@ def create(
             StandardValidator(schema={'type': 'number'}, format_checker=None)
             """
             cls = self.__class__
-            for f in fields(Validator):
-                if f.init:
-                    kwargs.setdefault(f.name, getattr(self, f.name))
+            if (
+                not _init_fields.issuperset(kwargs)
+                or kwargs.get("context", self.context) is None
+                or kwargs.get("resolver", self.resolver) is None
+            ):
+                for name in _init_fields:
+                    if name not in kwargs:
+                        kwargs[name] = getattr(self, name)
+                return cls(**kwargs)
 
-            return cls(**kwargs)
+            # with context and resolver set __post_init__ has nothing to do, so
+            # copy the instance dict and reset the fields __init__ does not take
+            new = object.__new__(cls)
+            new.__dict__.update(self.__dict__)
+            new.__dict__.update(kwargs)
+            new._type_checker = cfn_type_checker
+            new.format_checker = cfn_format_checker
+            new.validators = validators_arg
+            new.fn_resolvers = fn_resolvers_arg
+            return new
 
         def extend(
             self,
@@ -375,6 +390,8 @@ def create(
                 function_filter=function_filter,
                 fn_resolvers=all_fn_resolvers,
             )
+
+    _init_fields = frozenset(f.name for f in fields(Validator) if f.init)
 
     return Validator
 

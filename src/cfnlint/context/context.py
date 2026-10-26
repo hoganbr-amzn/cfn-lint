@@ -103,11 +103,13 @@ class Path:
         elif isinstance(kwargs.get("cfn_path"), int):
             raise ValueError(f"{kwargs['cfn_path']!r} cannot be an integer")
 
-        for f in fields(Path):
-            if kwargs.get(f.name) is not None:
-                kwargs[f.name] = getattr(self, f.name) + deque([kwargs[f.name]])
-            else:
-                kwargs[f.name] = getattr(self, f.name)
+        for name in _PATH_FIELDS:
+            value = kwargs.get(name)
+            current = getattr(self, name)
+            if value is not None:
+                current = current.copy()
+                current.append(value)
+            kwargs[name] = current
 
         return cls(**kwargs)
 
@@ -117,8 +119,9 @@ class Path:
         """
         cls = self.__class__
 
-        for f in fields(Path):
-            kwargs.setdefault(f.name, getattr(self, f.name))
+        for name in _PATH_FIELDS:
+            if name not in kwargs:
+                kwargs[name] = getattr(self, name)
 
         return cls(**kwargs)
 
@@ -129,6 +132,9 @@ class Path:
     @property
     def cfn_path_string(self):
         return "/".join(self.cfn_path)
+
+
+_PATH_FIELDS = tuple(f.name for f in fields(Path))
 
 
 @dataclass(frozen=True)
@@ -212,11 +218,21 @@ class Context:
             new_ref_values.update(kwargs["ref_values"])
             kwargs["ref_values"] = new_ref_values
 
-        for f in fields(Context):
-            if f.init:
-                kwargs.setdefault(f.name, getattr(self, f.name))
+        if not _CONTEXT_INIT_FIELDS.issuperset(kwargs):
+            # let the dataclass raise for an unknown keyword
+            for name in _CONTEXT_INIT_FIELDS:
+                if name not in kwargs:
+                    kwargs[name] = getattr(self, name)
+            return cls(**kwargs)
 
-        return cls(**kwargs)
+        # every field is set by __init__ and nothing runs after it, so a copy
+        # of the instance dict with the changes applied is the same object
+        new = object.__new__(cls)
+        new.__dict__.update(self.__dict__)
+        new.__dict__.update(kwargs)
+        if "resources" in kwargs:
+            new.__dict__.pop("module_names", None)
+        return new
 
     def ref_value(self, instance: str) -> Iterator[Tuple[str | list[str], "Context"]]:
         if instance in PSEUDOPARAMS:
@@ -310,6 +326,9 @@ class Context:
             + pseudo_params
             + list(self.ref_values.keys())
         )
+
+
+_CONTEXT_INIT_FIELDS = frozenset(f.name for f in fields(Context) if f.init)
 
 
 def _get_pseudo_value(parameter: str) -> str | list[str] | None:

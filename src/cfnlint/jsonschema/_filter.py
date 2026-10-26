@@ -201,8 +201,11 @@ class FunctionFilter:
         Create a new context merging together attributes
         """
         cls = self.__class__
-        for f in fields(FunctionFilter):
-            if f.init:
-                kwargs.setdefault(f.name, getattr(self, f.name))
+        for name in _FUNCTION_FILTER_INIT_FIELDS:
+            if name not in kwargs:
+                kwargs[name] = getattr(self, name)
 
         return cls(**kwargs)
+
+
+_FUNCTION_FILTER_INIT_FIELDS = tuple(f.name for f in fields(FunctionFilter) if f.init)
