@@ -19,7 +19,7 @@ SPDX-License-Identifier: MIT
 from __future__ import annotations
 
 import logging
-from collections import deque
+from collections import OrderedDict, deque
 from collections.abc import Mapping
 from dataclasses import dataclass, field, fields
 from typing import Any, Callable
@@ -43,8 +43,50 @@ from cfnlint.template import Template
 
 LOGGER = logging.getLogger(__name__)
 
+# Building a Validator dataclass is slow and extend() asks for the same one
+# for every resource a rule validates, so reuse them (least recently used out)
+_validator_classes: OrderedDict[Any, Any] = OrderedDict()
+_MAX_VALIDATOR_CLASSES = 1024
+
+
+def _function_filter_key(function_filter: FunctionFilter | None) -> Any:
+    if function_filter is None:
+        return None
+    return (
+        type(function_filter),
+        tuple(function_filter.group_functions),
+        function_filter.add_cfn_lint_keyword,
+        function_filter.validate_dynamic_references,
+    )
+
 
 def create(
+    validators: Mapping[str, V] | None = None,
+    function_filter: FunctionFilter | None = None,
+    fn_resolvers: Mapping[str, Any] | None = None,
+):
+    try:
+        key = (
+            tuple(validators.items()) if validators else (),
+            _function_filter_key(function_filter),
+            tuple(fn_resolvers.items()) if fn_resolvers else (),
+        )
+        cls = _validator_classes.get(key)
+    except TypeError:
+        # An unhashable validator or resolver; build without caching
+        return _create(validators, function_filter, fn_resolvers)
+
+    if cls is None:
+        cls = _create(validators, function_filter, fn_resolvers)
+        if len(_validator_classes) >= _MAX_VALIDATOR_CLASSES:
+            _validator_classes.popitem(last=False)
+        _validator_classes[key] = cls
+    else:
+        _validator_classes.move_to_end(key)
+    return cls
+
+
+def _create(
     validators: Mapping[str, V] | None = None,
     function_filter: FunctionFilter | None = None,
     fn_resolvers: Mapping[str, Any] | None = None,
