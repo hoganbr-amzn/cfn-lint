@@ -67,6 +67,30 @@ client = session.client("pricing", region_name="us-east-1", config=config)
 
 _UNSUPPORTED_REGIONS = set()
 
+# Neptune offers these classes (describe-orderable-db-instance-options) but the
+# Price List has no Database Instance product for them in the region. Safe to
+# leave once priced; remove an entry when the API stops returning it.
+_NEPTUNE_UNPRICED_X2IEZN = {
+    f"db.x2iezn.{size}"
+    for size in ("2xlarge", "4xlarge", "6xlarge", "8xlarge", "12xlarge")
+}
+_NEPTUNE_UNPRICED_INSTANCE_CLASSES = {
+    "ap-southeast-1": {
+        f"db.x2iedn.{size}"
+        for size in (
+            "xlarge",
+            "2xlarge",
+            "4xlarge",
+            "8xlarge",
+            "16xlarge",
+            "24xlarge",
+            "32xlarge",
+        )
+    },
+    "us-east-1": _NEPTUNE_UNPRICED_X2IEZN,
+    "us-west-2": _NEPTUNE_UNPRICED_X2IEZN,
+}
+
 
 def configure_logging():
     """Setup Logging"""
@@ -383,9 +407,16 @@ def get_sagemaker_pricing():
     return results
 
 
-def get_results(service, product_families, default=None):
+def get_results(service, product_families, default=None, region_defaults=None):
     if default is None:
         default = set()
+    if region_defaults is None:
+        region_defaults = {}
+    unknown_regions = set(region_defaults) - set(region_map.values())
+    if unknown_regions:
+        raise ValueError(
+            f"Unknown regions in region_defaults: {sorted(unknown_regions)}"
+        )
     results = {}
     for page in get_paginator(service):
         for price_item in page.get("PriceList", []):
@@ -402,11 +433,16 @@ def get_results(service, product_families, default=None):
                             product.get("attributes").get("location")
                         )
                         continue
-                    if not results.get(location):
+                    if location not in results:
                         results[location] = set(default)
                     instance_type = product.get("attributes").get("instanceType")
                     if instance_type:
                         results[location].add(instance_type)
+    # Only seed regions the Price List knows: a region absent from the enum is
+    # not validated, but one present with only the seed rejects every real class
+    for location, values in region_defaults.items():
+        if location in results:
+            results[location].update(values)
     return results
 
 
@@ -451,7 +487,10 @@ def main():
         "aws_neptune_dbinstance",
         "dbinstanceclass_enum",
         get_results(
-            "AmazonNeptune", ["Database Instance"], default=set(["db.serverless"])
+            "AmazonNeptune",
+            ["Database Instance"],
+            default=set(["db.serverless"]),
+            region_defaults=_NEPTUNE_UNPRICED_INSTANCE_CLASSES,
         ),
     )
     write_output(
