@@ -146,7 +146,8 @@ class BaseJsonSchema(CloudFormationLintRule):
         all_validators = self._get_validators()
         if validators:
             all_validators.update(validators)
-        return validator.extend(validators=all_validators)(schema=schema).evolve(
+        return validator.extend(validators=all_validators)(
+            schema=schema,
             cfn=validator.cfn,
             context=context,
             resolver=RefResolver.from_schema(

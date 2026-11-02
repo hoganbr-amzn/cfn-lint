@@ -8,8 +8,10 @@ from unittest.mock import patch
 
 import pytest
 
+from cfnlint.jsonschema._filter import FunctionFilter
 from cfnlint.jsonschema.exceptions import ValidationError
 from cfnlint.jsonschema.validators import CfnTemplateValidator
+from cfnlint.schema.resolver import RefResolver
 
 
 def fail(validator, errors, instance, schema):
@@ -1252,3 +1254,43 @@ def test_messages(name, schema, instance, expected, validator):
     validator = validator.evolve(schema=schema)
     errs = list(validator.iter_errors(instance))
     assert sorted(errs) == sorted(expected), f"{name!r} returned {errs!r}"
+
+
+def test_extend_returns_factory_for_same_class():
+    base = CfnTemplateValidator({})
+    extended = base.extend(validators={"fail": fail}, fn_resolvers={"Fn::X": fail})(
+        {"fail": [{"message": "boom"}]}
+    )
+
+    assert type(extended) is type(base)
+    assert "fail" in extended.validators
+    assert "Fn::X" in extended.fn_resolvers
+    assert "fail" not in base.validators
+    assert "Fn::X" not in base.fn_resolvers
+
+
+def test_extend_evolve_keeps_merged_validators():
+    extended = CfnTemplateValidator({}).extend(
+        validators={"fail": fail}, fn_resolvers={"Fn::X": fail}
+    )({"fail": [{"message": "boom"}]})
+
+    evolved = extended.evolve(schema={"fail": [{"message": "again"}]})
+    assert evolved.validators is extended.validators
+    assert evolved.fn_resolvers is extended.fn_resolvers
+    assert [e.message for e in evolved.iter_errors({})] == ["again"]
+
+
+def test_extend_factory_arguments():
+    base = CfnTemplateValidator({})
+    function_filter = FunctionFilter(add_cfn_lint_keyword=False)
+    resolver = RefResolver.from_schema({"type": "string"})
+    factory = base.extend(function_filter=function_filter)
+
+    validator = factory({"type": "string"}, resolver)
+    assert validator.schema == {"type": "string"}
+    assert validator.resolver is resolver
+    assert validator.function_filter is function_filter
+    assert base.function_filter is not function_filter
+
+    with pytest.raises(TypeError):
+        factory({"type": "string"}, resolver, function_filter)

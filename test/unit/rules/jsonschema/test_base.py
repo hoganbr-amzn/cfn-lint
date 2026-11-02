@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from collections import deque
 from test.unit.rules import BaseRuleTestCase
+from unittest.mock import patch
 
 from cfnlint.context import create_context_for_template
 from cfnlint.jsonschema import CfnTemplateValidator, ValidationError
@@ -76,6 +77,24 @@ class TestBaseJsonSchema(BaseRuleTestCase):
         self.assertEqual(validator.validators["foo"], _validator)
         self.assertIsNotNone(validator.validators["bar"])
         self.assertIsNone(validator.validators["foobar"])
+
+    def test_extend_validator_builds_one_validator(self):
+        rule = BaseJsonSchema()
+        cfn = Template("", {}, regions=["us-east-1"])
+        context = create_context_for_template(cfn)
+        schema = {"type": "object"}
+        base = CfnTemplateValidator({}, cfn=cfn)
+
+        with patch("cfnlint.jsonschema.validators.Template") as template:
+            validator = rule.extend_validator(base, schema, context)
+
+        template.assert_not_called()
+        self.assertIs(type(validator), type(base))
+        self.assertIs(validator.cfn, cfn)
+        self.assertIs(validator.context, context)
+        self.assertIs(validator.schema, schema)
+        self.assertIs(validator.resolver.referrer, schema)
+        self.assertIs(validator.function_filter, base.function_filter)
 
     def test_json_Schema_validator(self):
         class Rule(BaseJsonSchema):

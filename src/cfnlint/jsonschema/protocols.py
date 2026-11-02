@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from collections import deque
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, Any, ClassVar, Protocol, Type, runtime_checkable
+from typing import TYPE_CHECKING, Any, Callable, ClassVar, Protocol, runtime_checkable
 
 from cfnlint.jsonschema._filter import FunctionFilter
 
@@ -208,17 +208,19 @@ class Validator(Protocol):
 
     def extend(
         self,
-        validators: dict[str, V] | None,
+        validators: dict[str, V] | None = None,
         function_filter: FunctionFilter | None = None,
-        context: Context | None = None,
-    ) -> Type[Validator]:
+        fn_resolvers: Mapping[str, Callable[[Validator, Any], Any]] | None = None,
+    ) -> Callable[..., Validator]:
         """
-        Extends the validator with a new set of validators to replace VALIDATORS.
+        Returns a factory for validators like this one, with the validators
+        and function resolvers provided merged into this validator's own.
+        A `function_filter`, when given, replaces this validator's filter.
 
-        This function recall create with the a merged list of validators from the
-        current instance merged with the parameters.
+        The factory takes the same arguments as the validator class, with
+        `function_filter` passed by keyword.
 
         >>> validator = CfnTemplateValidator({})
-        >>> validator.extend(validators={"type": type})
+        >>> validator.extend(validators={"type": type})({"type": "number"})
         CfnTemplateValidator(schema={'type': 'number'}, format_checker=None)
         """

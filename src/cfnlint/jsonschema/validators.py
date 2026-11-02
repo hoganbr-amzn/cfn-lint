@@ -22,6 +22,7 @@ import logging
 from collections import deque
 from collections.abc import Mapping
 from dataclasses import dataclass, field, fields
+from functools import partial
 from typing import Any, Callable
 
 from cfnlint.conditions import UnknownSatisfisfaction
@@ -76,7 +77,7 @@ def create(
         #: The schema that will be used to validate instances
         schema: Mapping | bool = field(repr=True, default=True)
         validators: Mapping[str, V] = field(
-            init=False, default_factory=lambda: validators_arg
+            kw_only=True, default_factory=lambda: validators_arg
         )
         resolver: RefResolver = field(default=None, repr=False)  # type: ignore
         function_filter: FunctionFilter = field(
@@ -88,7 +89,7 @@ def create(
         fn_resolvers: Mapping[
             str,
             Callable[["Validator", Any], ResolutionResult],
-        ] = field(init=False, default_factory=lambda: fn_resolvers_arg)
+        ] = field(kw_only=True, default_factory=lambda: fn_resolvers_arg)
 
         def __post_init__(self):
             if self.context is None:
@@ -351,13 +352,14 @@ def create(
             validators: dict[str, V] | None = None,
             function_filter: FunctionFilter | None = None,
             fn_resolvers: Mapping[str, Callable[["Validator", Any], Any]] | None = None,
-        ) -> "Validator":
+        ) -> Callable[..., "Validator"]:
             """
-            Extends the current validator.
+            Returns a factory for validators like this one, with the validators
+            and function resolvers provided merged in. A `function_filter`,
+            when given, replaces this validator's filter.
 
-            Updates validator in the current instance with the validators provided.
-
-            >>> validator = StandardValidator({}).extend(validators={"type": type})
+            >>> extended = StandardValidator({}).extend(validators={"type": type})
+            >>> validator = extended({"type": "number"})
             """
             all_validators = dict(self.validators)
             if validators is not None:
@@ -370,7 +372,8 @@ def create(
             if fn_resolvers is not None:
                 all_fn_resolvers.update(fn_resolvers)
 
-            return create(  # type: ignore
+            return partial(
+                self.__class__,
                 validators=all_validators,
                 function_filter=function_filter,
                 fn_resolvers=all_fn_resolvers,
