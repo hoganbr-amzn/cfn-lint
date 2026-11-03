@@ -398,3 +398,109 @@ class TestConditions(TestCase):
                 {"IsDeployed": False, "IsProd": False},
             ],
         )
+
+    def test_satisfiable_with_unhashable_parameter_values(self):
+        """A parameter file can give a parameter a value that cannot be
+        hashed or sorted, such as an object with keys of mixed types"""
+        template = decode_str(
+            """
+        Parameters:
+          Environment:
+            Type: String
+            Default: "dev"
+        Conditions:
+          IsProd: !Equals [!Ref Environment, "prod"]
+        """
+        )[0]
+
+        cfn = Template("", template)
+
+        for value in ({1: "a", "b": "c"}, [{1: "a", "b": "c"}, 2, True]):
+            self.assertFalse(
+                cfn.conditions.satisfiable({"IsProd": True}, {"Environment": value})
+            )
+            self.assertTrue(
+                cfn.conditions.satisfiable({"IsProd": False}, {"Environment": value})
+            )
+        self.assertTrue(
+            cfn.conditions.satisfiable({"IsProd": True}, {"Environment": "prod"})
+        )
+
+    def test_scenarios_are_computed_once_and_on_demand(self):
+        """The scenarios for a set of conditions are kept once computed, a
+        caller that stops early pays only for what it read, and every
+        caller gets its own copies."""
+        import cfnlint.conditions.conditions as module
+
+        template = decode_str(
+            """
+        Conditions:
+          A: !Equals [!Ref "AWS::Region", "us-east-1"]
+          B: !Equals [!Ref "AWS::AccountId", "123456789012"]
+          C: !Equals [!Ref "AWS::Partition", "aws"]
+        """
+        )[0]
+        cfn = Template("", template)
+        conditions = {"A": None, "B": None, "C": None}
+
+        calls = []
+        real = module.satisfiable
+
+        def counting(cnf, *args, **kwargs):
+            calls.append(cnf)
+            return real(cnf, *args, **kwargs)
+
+        module.satisfiable = counting
+        try:
+            first = next(iter(cfn.conditions.build_scenarios(conditions)))
+            self.assertEqual(len(calls), 1)
+
+            scenarios = list(cfn.conditions.build_scenarios(conditions))
+            self.assertEqual(len(scenarios), 8)
+            self.assertEqual(len(calls), 8)
+            self.assertEqual(first, scenarios[0])
+            self.assertIsNot(first, scenarios[0])
+
+            first["A"] = "changed"
+            again = list(cfn.conditions.build_scenarios(conditions))
+            self.assertEqual(again, scenarios)
+            self.assertEqual(len(calls), 8)
+        finally:
+            module.satisfiable = real
+
+    def test_satisfiable_is_answered_once(self):
+        import cfnlint.conditions.conditions as module
+
+        template = decode_str(
+            """
+        Parameters:
+          Environment:
+            Type: String
+            Default: "dev"
+        Conditions:
+          IsProd: !Equals [!Ref Environment, "prod"]
+        """
+        )[0]
+        cfn = Template("", template)
+
+        calls = []
+        real = module.satisfiable
+
+        def counting(cnf, *args, **kwargs):
+            calls.append(cnf)
+            return real(cnf, *args, **kwargs)
+
+        module.satisfiable = counting
+        try:
+            for _ in range(3):
+                self.assertTrue(
+                    cfn.conditions.satisfiable(
+                        {"IsProd": True}, {"Environment": "prod"}
+                    )
+                )
+                self.assertFalse(
+                    cfn.conditions.satisfiable({"IsProd": True}, {"Environment": "dev"})
+                )
+            self.assertEqual(len(calls), 2)
+        finally:
+            module.satisfiable = real

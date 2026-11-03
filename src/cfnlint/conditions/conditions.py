@@ -20,9 +20,33 @@ from cfnlint.conditions._condition import ConditionNamed
 from cfnlint.conditions._equals import Equal, EqualParameter
 from cfnlint.conditions._errors import UnknownSatisfisfaction
 from cfnlint.conditions._rule import Rule
-from cfnlint.conditions._utils import add_equivalence, get_hash
+from cfnlint.conditions._utils import add_equivalence, copy_cnf, get_hash
 
 LOGGER = logging.getLogger(__name__)
+
+
+class _Scenarios:
+    """Replayable view of a scenario generator.
+
+    Scenarios are computed on demand and kept, so a caller that stops after
+    the first scenario costs one SAT call, and the next caller asking the same
+    question costs none.
+    """
+
+    def __init__(self, source: Iterator[dict[str, bool]]) -> None:
+        self._source = source
+        self._items: list[dict[str, bool]] = []
+
+    def __iter__(self) -> Iterator[dict[str, bool]]:
+        i = 0
+        while True:
+            if i == len(self._items):
+                try:
+                    self._items.append(next(self._source))
+                except StopIteration:
+                    return
+            yield self._items[i]
+            i += 1
 
 
 class Conditions:
@@ -32,6 +56,8 @@ class Conditions:
 
     def __init__(self, cfn) -> None:
         self._conditions: dict[str, ConditionNamed] = {}
+        self._scenario_cache: dict[Any, _Scenarios] = {}
+        self._satisfiable_cache: dict[Any, bool] = {}
         self._parameters: dict[str, list[str]] = {}
         self._rules: list[Rule] = []
         self._init_conditions(cfn=cfn)
@@ -218,6 +244,29 @@ class Conditions:
     def build_scenarios(
         self, conditions: dict[str, Set[bool]], region: str | None = None
     ) -> Iterator[dict[str, bool]]:
+        """Yield the scenarios for ``conditions``, computing each set once.
+
+        Every resource that uses the same conditions asks the same question,
+        and the answer only depends on the template, so it is kept.
+        """
+        # Hash, don't sort: condition names from a malformed template can be
+        # of mixed types (an int next to a str) and would not compare.
+        key = (
+            frozenset(
+                (k, None if v is None else frozenset(v)) for k, v in conditions.items()
+            ),
+            region,
+        )
+        if key not in self._scenario_cache:
+            self._scenario_cache[key] = _Scenarios(
+                self._build_scenarios(conditions, region)
+            )
+        for scenario in self._scenario_cache[key]:
+            yield dict(scenario)
+
+    def _build_scenarios(
+        self, conditions: dict[str, Set[bool]], region: str | None = None
+    ) -> Iterator[dict[str, bool]]:
         """Given a list of condition names this function will
         yield scenarios that represent those conditions and
         there result (True/False)
@@ -232,7 +281,7 @@ class Conditions:
         if len(conditions) == 0:
             return
 
-        c_cnf = self._cnf.copy()
+        c_cnf = copy_cnf(self._cnf)
         condition_names = []
         conditions_set = {}
         for condition_name, values in conditions.items():
@@ -268,7 +317,7 @@ class Conditions:
                 products = itertools.product([True, False], repeat=len(condition_names))  # type: ignore
 
             for p in products:
-                cnf = c_cnf.copy()
+                cnf = copy_cnf(c_cnf)
                 params = dict(zip(condition_names, p))
                 for condition_name, opt in params.items():
                     if opt:
@@ -328,7 +377,7 @@ class Conditions:
             bool: if the implied condition will be True if the scenario is True
         """
         try:
-            cnf = self._cnf.copy()
+            cnf = copy_cnf(self._cnf)
             # if the implies condition has to be false in the scenarios we
             # know it can never be true
             if not scenarios.get(implies, True):
@@ -378,7 +427,7 @@ class Conditions:
             list[bool]: Returns True, False, or True and False depending on if the
                condition could be True, False or both based on the region parameter
         """
-        cnf_region = self._cnf.copy()
+        cnf_region = copy_cnf(self._cnf)
         found_region = False
 
         # validate the condition name exists
@@ -402,14 +451,14 @@ class Conditions:
             return [True, False]
 
         results = []
-        cnf_test = cnf_region.copy()
+        cnf_test = copy_cnf(cnf_region)
         cnf_test.add_prop(
             self._conditions[condition_name].build_true_cnf(self._solver_params)
         )
         if satisfiable(cnf_test):
             results.append(True)
 
-        cnf_test = cnf_region.copy()
+        cnf_test = copy_cnf(cnf_region)
         cnf_test.add_prop(
             self._conditions[condition_name].build_false_cnf(self._solver_params)
         )
@@ -434,6 +483,23 @@ class Conditions:
         Raises:
             UnknownSatisfisfaction: If we don't know how to satisfy a condition
         """
+        # Every region of every resource asks the same question; keep the
+        # answer. Hash, don't sort: keys from a malformed template can be of
+        # mixed types. Unhashable values (a resolved list or object) are
+        # simply not kept.
+        try:
+            key = (frozenset(conditions.items()), frozenset(parameter_values.items()))
+        except TypeError:
+            return self._satisfiable(conditions, parameter_values)
+        if key not in self._satisfiable_cache:
+            self._satisfiable_cache[key] = self._satisfiable(
+                conditions, parameter_values
+            )
+        return self._satisfiable_cache[key]
+
+    def _satisfiable(
+        self, conditions: dict[str, bool], parameter_values: dict[str, str]
+    ) -> bool:
         if not conditions:
             if self._rules:
                 satisfied = satisfiable(self._cnf, all_models=False)
@@ -443,7 +509,7 @@ class Conditions:
             else:
                 return True
 
-        cnf = self._cnf.copy()
+        cnf = copy_cnf(self._cnf)
         at_least_one_param_found = False
 
         for condition_name, opt in conditions.items():
