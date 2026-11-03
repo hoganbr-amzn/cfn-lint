@@ -397,6 +397,9 @@ class Conditions:
                 continue
             if current.status is not None and current.status != value:
                 raise Unsatisfiable(new_status=status, current_status=self.status)
+            if value is None:
+                # not a pin: the condition stays unknown
+                continue
             pins.add((condition, value))
             # Only the conditions being pinned by *this* call, and only when
             # they are facts (not enumeration hypotheses), are facts of the

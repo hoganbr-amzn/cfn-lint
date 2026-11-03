@@ -114,3 +114,32 @@ def test_cfn_lint_follows_child_rule_changes():
     assert list(rule.cfnLint(validator, ["Foo", "Bar"], True, {})) == [
         ValidationError(message="No Bar", rule=_BarError()),
     ]
+
+
+class _BarErrorSameId(CfnLintKeyword):
+    id = "EXXXX"
+    shortdesc = "A rule"
+    description = "A rule"
+
+    def __init__(self) -> None:
+        super().__init__(["Bar"])
+
+    def validate(self, validator, keywords, instance, schema):
+        yield ValidationError("No Bar")
+
+
+def test_cfn_lint_follows_child_rule_replaced_with_same_id():
+    rule = CfnLint()
+    context = Context(regions=["us-east-1"])
+    validator = CfnTemplateValidator(schema={}, context=context)
+
+    rule.child_rules["EXXXX"] = _FooError()
+    assert [e.message for e in rule.cfnLint(validator, ["Foo", "Bar"], True, {})] == [
+        "No Foo"
+    ]
+
+    # rules compare equal by id, so the swap must be seen by identity
+    rule.child_rules["EXXXX"] = _BarErrorSameId()
+    assert [e.message for e in rule.cfnLint(validator, ["Foo", "Bar"], True, {})] == [
+        "No Bar"
+    ]

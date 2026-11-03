@@ -21,8 +21,11 @@ class CfnLint(CloudFormationLintRule):
     def _rules_for_keyword(self, keyword: str) -> list[CloudFormationLintRule]:
         # child rules are linked after construction and can change
         # between runs so rebuild the index when they do
+        # rules compare equal by id so compare the instances themselves
         rules = tuple(self.child_rules.values())
-        if rules != self._indexed_rules:
+        if len(rules) != len(self._indexed_rules) or any(
+            rule is not indexed for rule, indexed in zip(rules, self._indexed_rules)
+        ):
             index: dict[str, list[CloudFormationLintRule]] = {}
             for rule in rules:
                 if rule is None or not rule.id:

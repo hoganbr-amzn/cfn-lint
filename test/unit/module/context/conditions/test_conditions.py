@@ -681,3 +681,18 @@ def test_duplicate_equals_share_one_value():
     assert both.is_reachable("IsUsEast1Again", False) is False
     assert both.is_reachable("IsEuWest1", True) is False
     conditions.evolve({"IsUsEast1": False, "IsUsEast1Again": False, "IsUsWest2": True})
+
+
+def test_evolve_with_unknown_status_does_not_pin():
+    """A status of None leaves the condition unknown, so both values of it
+    stay reachable and the clauses do not exclude either."""
+    cfn = Template(None, template(), regions=["us-east-1"])
+    base = create_context_for_template(cfn).conditions
+
+    evolved = base.evolve({"IsUsEast1": None, "IsProd": True})
+
+    assert "IsUsEast1" not in evolved.status
+    assert evolved.is_reachable("IsUsEast1", True) is True
+    assert evolved.is_reachable("IsUsEast1", False) is True
+    assert evolved.evolve({"IsUsEast1": True}).status["IsUsEast1"] is True
+    assert evolved.evolve({"IsUsEast1": False}).status["IsUsEast1"] is False
