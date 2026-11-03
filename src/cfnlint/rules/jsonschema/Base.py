@@ -26,6 +26,8 @@ class BaseJsonSchema(CloudFormationLintRule):
         self.rules: dict[str, Any] = {}
         self.rule_set: dict[str, str] = {}
         self.validators: dict[str, V] = {}
+        # the validator classes this rule extended, see Validator.extend
+        self._extended_validators: dict[Any, Any] = {}
 
     def _convert_validation_errors_to_matches(
         self,
@@ -146,7 +148,9 @@ class BaseJsonSchema(CloudFormationLintRule):
         all_validators = self._get_validators()
         if validators:
             all_validators.update(validators)
-        return validator.extend(validators=all_validators)(schema=schema).evolve(
+        return validator.extend(
+            validators=all_validators, cache=self._extended_validators
+        )(schema=schema).evolve(
             cfn=validator.cfn,
             context=context,
             resolver=RefResolver.from_schema(

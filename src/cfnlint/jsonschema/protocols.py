@@ -211,12 +211,15 @@ class Validator(Protocol):
         validators: dict[str, V] | None,
         function_filter: FunctionFilter | None = None,
         context: Context | None = None,
+        cache: dict[Any, Any] | None = None,
     ) -> Type[Validator]:
         """
         Extends the validator with a new set of validators to replace VALIDATORS.
 
         This function recall create with the a merged list of validators from the
-        current instance merged with the parameters.
+        current instance merged with the parameters. When a ``cache`` is given the
+        class created for an extension is kept in it and returned the next time
+        the same extension is asked for.
 
         >>> validator = CfnTemplateValidator({})
         >>> validator.extend(validators={"type": type})

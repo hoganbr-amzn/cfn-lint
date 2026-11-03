@@ -350,11 +350,17 @@ def create(
             validators: dict[str, V] | None = None,
             function_filter: FunctionFilter | None = None,
             fn_resolvers: Mapping[str, Callable[["Validator", Any], Any]] | None = None,
+            cache: dict[Any, Any] | None = None,
         ) -> "Validator":
             """
             Extends the current validator.
 
             Updates validator in the current instance with the validators provided.
+            Creating a class is expensive and rules extend the validator with the
+            same callables on every validation, so a caller that passes a ``cache``
+            gets the class it created before for the same extension back. The
+            caller owns the cache: the classes, and the bound methods they hold,
+            live only as long as it does.
 
             >>> validator = StandardValidator({}).extend(validators={"type": type})
             """
@@ -369,11 +375,31 @@ def create(
             if fn_resolvers is not None:
                 all_fn_resolvers.update(fn_resolvers)
 
-            return create(  # type: ignore
+            key = None
+            if cache is not None:
+                try:
+                    key = (
+                        frozenset(all_validators.items()),
+                        type(function_filter),
+                        function_filter.add_cfn_lint_keyword,
+                        function_filter.validate_dynamic_references,
+                        frozenset(all_fn_resolvers.items()),
+                    )
+                except TypeError:  # an unhashable validator
+                    pass
+                else:
+                    extended = cache.get(key)
+                    if extended is not None:
+                        return extended  # type: ignore
+
+            extended = create(  # type: ignore
                 validators=all_validators,
                 function_filter=function_filter,
                 fn_resolvers=all_fn_resolvers,
             )
+            if cache is not None and key is not None:
+                cache[key] = extended
+            return extended  # type: ignore
 
     return Validator
 

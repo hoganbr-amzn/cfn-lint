@@ -22,6 +22,8 @@ class PropertyNames(CloudFormationLintRule):
         self.child_rules = {}
         if self.approaching_limit_rule:
             self.child_rules[self.approaching_limit_rule] = None
+        # the validator classes this rule extended, see Validator.extend
+        self._extended_validators: dict[Any, Any] = {}
 
     def _max_length(
         self, validator: Validator, mL: int, instance: Any, schema: dict[str, Any]
@@ -62,7 +64,8 @@ class PropertyNames(CloudFormationLintRule):
         v = validator.extend(
             validators={
                 "maxLength": self._max_length,
-            }
+            },
+            cache=self._extended_validators,
         )({})
 
         for property in instance:
