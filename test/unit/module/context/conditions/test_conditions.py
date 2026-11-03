@@ -562,3 +562,63 @@ def test_is_reachable_is_answered_once(monkeypatch):
     assert fact.is_reachable("IsUsEast1AndProd", False) is False
     assert fact.is_reachable("IsUsEast1AndProd", True) is True
     assert len(calls) == 1
+
+
+@pytest.mark.parametrize("values", [1, 2, 3, 48])
+def test_at_most_one_value_per_reference(values):
+    """Fn::Equals of one reference to different values: any one can hold,
+    no two can hold together, whatever the number of values."""
+    cfn = Template(
+        None,
+        {
+            "Conditions": {
+                f"IsRegion{i}": {"Fn::Equals": [{"Ref": "AWS::Region"}, f"region-{i}"]}
+                for i in range(values)
+            },
+            "Resources": {},
+        },
+        regions=["us-east-1"],
+    )
+    conditions = create_context_for_template(cfn).conditions
+
+    # Each value adds its definition and one clause per helper bit; a
+    # pairwise encoding of 48 values alone would take 1,128 clauses.
+    width = (values - 1).bit_length()
+    assert len(conditions.cnf.data) <= values * (2 + width)
+
+    for i in range(values):
+        assert conditions.is_reachable(f"IsRegion{i}", True) is True
+        assert conditions.is_reachable(f"IsRegion{i}", False) is True
+    for i in range(1, values):
+        with pytest.raises(Unsatisfiable):
+            conditions.evolve({"IsRegion0": True, f"IsRegion{i}": True})
+    # All of them false is possible: the region can be none of these.
+    conditions.evolve({f"IsRegion{i}": False for i in range(values)})
+
+
+def test_duplicate_equals_share_one_value():
+    """The same Fn::Equals written in several conditions is one value: the
+    conditions agree with each other and exclude the other values."""
+    cfn = Template(
+        None,
+        {
+            "Conditions": {
+                "IsUsEast1": {"Fn::Equals": [{"Ref": "AWS::Region"}, "us-east-1"]},
+                "IsUsEast1Again": {"Fn::Equals": [{"Ref": "AWS::Region"}, "us-east-1"]},
+                "IsUsWest2": {"Fn::Equals": [{"Ref": "AWS::Region"}, "us-west-2"]},
+                "IsEuWest1": {"Fn::Equals": [{"Ref": "AWS::Region"}, "eu-west-1"]},
+            },
+            "Resources": {},
+        },
+        regions=["us-east-1"],
+    )
+    conditions = create_context_for_template(cfn).conditions
+
+    with pytest.raises(Unsatisfiable):
+        conditions.evolve({"IsUsEast1": True, "IsUsEast1Again": False})
+    with pytest.raises(Unsatisfiable):
+        conditions.evolve({"IsUsEast1Again": True, "IsUsWest2": True})
+    both = conditions.evolve({"IsUsEast1": True})
+    assert both.is_reachable("IsUsEast1Again", False) is False
+    assert both.is_reachable("IsEuWest1", True) is False
+    conditions.evolve({"IsUsEast1": False, "IsUsEast1Again": False, "IsUsWest2": True})

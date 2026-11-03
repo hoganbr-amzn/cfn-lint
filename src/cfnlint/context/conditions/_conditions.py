@@ -9,7 +9,7 @@ import itertools
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Iterator
 
-from sympy import Not, Or, Symbol
+from sympy import Dummy, Not, Or, Symbol
 from sympy.assumptions.cnf import EncodedCNF
 from sympy.logic.inference import satisfiable
 
@@ -114,7 +114,7 @@ class Conditions:
         # cannot both be true. Previously this constraint was only added
         # inside the AllowedValues loop below, so plain parameters and
         # pseudo-parameters never got it (issue #4799).
-        equals_by_ref: dict[str, list[tuple[Symbol, str]]] = {}
+        equals_by_ref: dict[str, dict[str, list[Symbol]]] = {}
         # A condition's equals include those of the conditions it references,
         # so one Fn::Equals can appear many times. Each is encoded only once.
         seen_equals: set[str] = set()
@@ -127,11 +127,25 @@ class Conditions:
                 if i.hash in seen_equals:
                     continue
                 seen_equals.add(i.hash)
-                seen = equals_by_ref.setdefault(i.right.hash, [])
-                for prev_cnf, prev_val in seen:
-                    if prev_val != i.left.instance:
-                        cnf.add_prop(~(i.cnf & prev_cnf))
-                seen.append((i.cnf, i.left.instance))
+                equals_by_ref.setdefault(i.right.hash, {}).setdefault(
+                    i.left.instance, []
+                ).append(i.cnf)
+        # Bitwise at-most-one: every static value of a reference gets a
+        # distinct binary code over ceil(log2(n)) helper symbols, and each
+        # Fn::Equals symbol implies the bits of its value's code. Two
+        # Fn::Equals with different values force different bit patterns and so
+        # cannot both be true. This needs n*log2(n) clauses instead of the
+        # n*(n-1)/2 of a pairwise encoding.
+        for _, by_value in equals_by_ref.items():
+            if len(by_value) < 2:
+                continue
+            width = (len(by_value) - 1).bit_length()
+            bits = [Dummy("value_bit") for _ in range(width)]
+            for code, value_symbols in enumerate(by_value.values()):
+                for k, bit in enumerate(bits):
+                    literal = bit if (code >> k) & 1 else Not(bit)
+                    for value_symbol in value_symbols:
+                        cnf.add_prop(Or(Not(value_symbol), literal))
 
         # Add parameter AllowedValues constraints
         for p_k, p_v in parameters.items():
