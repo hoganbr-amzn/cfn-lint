@@ -80,6 +80,19 @@ def get_hash(o: Any) -> str:
         ).hexdigest()
 
 
+def copy_cnf(cnf: EncodedCNF) -> EncodedCNF:
+    """Copy an EncodedCNF so that clauses can be appended to the copy.
+
+    The clause sets themselves are shared, not copied: cfn-lint never
+    changes an encoded clause (``EncodedCNF`` only appends new ones) and
+    sympy's SAT solver works on its own ``list(clause)`` of each
+    (``SATSolver._initialize_clauses``). ``EncodedCNF.copy`` rebuilds every
+    clause set, which for a CNF of hundreds of clauses copied on every
+    condition evaluation was most of the time spent linting a template.
+    """
+    return EncodedCNF(list(cnf.data), dict(cnf.encoding))
+
+
 def add_equivalence(cnf: EncodedCNF, symbol: Boolean, expr: Boolean) -> None:
     """Add ``symbol <-> expr`` to ``cnf`` without exponential growth.
 

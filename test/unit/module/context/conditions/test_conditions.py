@@ -480,3 +480,85 @@ def test_referenced_equals_are_paired_once():
         conditions.evolve({"IsRegion0": True, "IsRegion1": True})
     with pytest.raises(Unsatisfiable):
         conditions.evolve({"InGroup0": False, "IsRegion3": True})
+
+
+def _count_sat_calls(monkeypatch):
+    """Count the SAT solver calls made by the conditions module."""
+    import cfnlint.context.conditions._conditions as module
+
+    calls = []
+    real = module.satisfiable
+
+    def counting(cnf, *args, **kwargs):
+        calls.append(cnf)
+        return real(cnf, *args, **kwargs)
+
+    monkeypatch.setattr(module, "satisfiable", counting)
+    return calls
+
+
+def test_evolve_is_answered_once_per_question(monkeypatch):
+    """Every resource using a condition asks the same question, so the
+    solver is asked once and the same Conditions is handed back."""
+    cfn = Template(None, template(), regions=["us-east-1"])
+    base = create_context_for_template(cfn).conditions
+    calls = _count_sat_calls(monkeypatch)
+
+    first = base.evolve({"IsUsEast1": True})
+    assert base.evolve({"IsUsEast1": True}) is first
+    assert len(calls) == 1
+
+    # Whether a pin is a fact or an enumeration hypothesis does not change
+    # whether it is consistent, so the verdict is shared between the two.
+    assumed = base.evolve({"IsUsEast1": True}, assumed=True)
+    assert assumed is not first
+    assert assumed.status == first.status
+    assert len(calls) == 1
+
+    # An impossible pin is remembered too, and raised afresh each time.
+    with pytest.raises(Unsatisfiable) as one:
+        base.evolve({"IsUsEast1": True, "IsUsWest2": True})
+    with pytest.raises(Unsatisfiable) as two:
+        base.evolve({"IsUsEast1": True, "IsUsWest2": True})
+    assert one.value is not two.value
+    assert len(calls) == 2
+
+    # The same state reached by another route is the same answer.
+    assert first.evolve({"IsProd": True}) is base.evolve(
+        {"IsProd": True, "IsUsEast1": True}
+    )
+
+
+def test_evolved_conditions_share_the_template_clauses():
+    """An evolved Conditions keeps its pins, not a copy of the template's
+    clauses; the clauses are built when asked for."""
+    cfn = Template(None, template(), regions=["us-east-1"])
+    base = create_context_for_template(cfn).conditions
+    template_clauses = len(base.cnf.data)
+
+    fact = base.evolve({"IsUsEast1": True})
+    assumed = fact.evolve({"IsProd": True}, assumed=True)
+    assert len(fact.cnf.data) == template_clauses + 1
+    assert len(fact.hard_cnf.data) == template_clauses + 1
+    assert len(assumed.cnf.data) == template_clauses + 2
+    assert len(assumed.hard_cnf.data) == template_clauses + 1
+    # The unpinned conditions are the template's own objects.
+    assert assumed.conditions["IsDev"] is base.conditions["IsDev"]
+    assert assumed.conditions["IsUsEast1"].status is True
+    assert assumed.conditions["IsProd"].status is True
+    assert base.conditions["IsUsEast1"].status is None
+
+
+def test_is_reachable_is_answered_once(monkeypatch):
+    cfn = Template(None, template(), regions=["us-east-1"])
+    base = create_context_for_template(cfn).conditions
+    fact = base.evolve({"IsUsEast1AndProd": True})
+    calls = _count_sat_calls(monkeypatch)
+
+    assert fact.is_reachable("IsProd", False) is False
+    assert fact.is_reachable("IsProd", False) is False
+    assert len(calls) == 1
+    # A pinned fact needs no solver at all.
+    assert fact.is_reachable("IsUsEast1AndProd", False) is False
+    assert fact.is_reachable("IsUsEast1AndProd", True) is True
+    assert len(calls) == 1
