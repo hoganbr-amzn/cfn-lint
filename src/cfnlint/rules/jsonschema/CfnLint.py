@@ -13,6 +13,26 @@ class CfnLint(CloudFormationLintRule):
     description = "Use supplemental logic to validate properties against"
     tags = []
 
+    def __init__(self) -> None:
+        super().__init__()
+        self._rules_by_keyword: dict[str, list[CloudFormationLintRule]] = {}
+        self._indexed_rules: tuple[CloudFormationLintRule | None, ...] = ()
+
+    def _rules_for_keyword(self, keyword: str) -> list[CloudFormationLintRule]:
+        # child rules are linked after construction and can change
+        # between runs so rebuild the index when they do
+        rules = tuple(self.child_rules.values())
+        if rules != self._indexed_rules:
+            index: dict[str, list[CloudFormationLintRule]] = {}
+            for rule in rules:
+                if rule is None or not rule.id:
+                    continue
+                for rule_keyword in getattr(rule, "keywords", []):
+                    index.setdefault(rule_keyword, []).append(rule)
+            self._rules_by_keyword = index
+            self._indexed_rules = rules
+        return self._rules_by_keyword.get(keyword, [])
+
     # pylint: disable=unused-argument
     def cfnLint(self, validator, keywords, instance, schema):
         validator = validator.evolve(
@@ -22,16 +42,9 @@ class CfnLint(CloudFormationLintRule):
         )
 
         for keyword in keywords:
-            for rule in self.child_rules.values():
-                if rule is None:
-                    continue
-                if not rule.id:
-                    continue
-
-                for rule_keyword in rule.keywords:
-                    if rule_keyword == keyword:
-                        for err in rule.validate(validator, keyword, instance, schema):
-                            if err.rule is None:
-                                if isinstance(err.validator, Unset):
-                                    err.rule = rule
-                            yield err
+            for rule in self._rules_for_keyword(keyword):
+                for err in rule.validate(validator, keyword, instance, schema):
+                    if err.rule is None:
+                        if isinstance(err.validator, Unset):
+                            err.rule = rule
+                    yield err

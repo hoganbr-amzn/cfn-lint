@@ -89,3 +89,28 @@ def test_cfn_schema(name, keywords, expected_errs, rule):
 
     errs = list(rule.cfnLint(validator, keywords, True, {}))
     assert errs == expected_errs, f"{name} failed {errs} did not match {expected_errs}"
+
+
+def test_cfn_lint_follows_child_rule_changes():
+    rule = CfnLint()
+    context = Context(regions=["us-east-1"])
+    validator = CfnTemplateValidator(schema={}, context=context)
+
+    assert list(rule.cfnLint(validator, ["Foo", "Bar"], True, {})) == []
+
+    rule.child_rules["EXXXX"] = _FooError()
+    assert list(rule.cfnLint(validator, ["Foo", "Bar"], True, {})) == [
+        ValidationError(message="No Foo", rule=_FooError()),
+    ]
+
+    rule.child_rules["EYYYY"] = _BarError()
+    assert list(rule.cfnLint(validator, ["Foo", "Bar"], True, {})) == [
+        ValidationError(message="No Foo", rule=_FooError()),
+        ValidationError(message="No Bar", rule=_BarError()),
+    ]
+
+    # a rule can be unlinked again
+    rule.child_rules["EXXXX"] = None
+    assert list(rule.cfnLint(validator, ["Foo", "Bar"], True, {})) == [
+        ValidationError(message="No Bar", rule=_BarError()),
+    ]
