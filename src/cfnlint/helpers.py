@@ -645,6 +645,22 @@ def bool_compare(first, second):
     return first is second
 
 
+def init_field_names(cls: type) -> tuple[str, ...]:
+    """
+    Names of the ``__init__`` fields of a dataclass.
+
+    ``dataclasses.fields`` rebuilds its result on every call so
+    cache it on the class for the hot ``evolve`` and ``descend`` paths.
+    The cache lives on the class itself so short lived classes
+    (``Validator.extend`` creates one per call) are not kept alive.
+    """
+    names = cls.__dict__.get("_init_field_names")
+    if names is None:
+        names = tuple(f.name for f in dataclasses.fields(cls) if f.init)
+        setattr(cls, "_init_field_names", names)
+    return names
+
+
 def is_function(instance: Any) -> tuple[str | None, Any]:
     """
     Checks if the given instance is a dictionary representing a function.

@@ -5,7 +5,7 @@ SPDX-License-Identifier: MIT-0
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Iterator, Sequence, Tuple
 
 from cfnlint.helpers import (
@@ -15,6 +15,7 @@ from cfnlint.helpers import (
     REGEX_DYN_REF_SPACES,
     ToPy,
     ensure_list,
+    init_field_names,
 )
 
 if TYPE_CHECKING:
@@ -201,8 +202,7 @@ class FunctionFilter:
         Create a new context merging together attributes
         """
         cls = self.__class__
-        for f in fields(FunctionFilter):
-            if f.init:
-                kwargs.setdefault(f.name, getattr(self, f.name))
+        for name in init_field_names(FunctionFilter):
+            kwargs.setdefault(name, getattr(self, name))
 
         return cls(**kwargs)

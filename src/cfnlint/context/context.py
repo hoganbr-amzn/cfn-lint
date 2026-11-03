@@ -9,7 +9,7 @@ import os
 from abc import ABC, abstractmethod
 from collections import deque
 from copy import deepcopy
-from dataclasses import InitVar, dataclass, field, fields
+from dataclasses import InitVar, dataclass, field
 from functools import cached_property, lru_cache
 from typing import TYPE_CHECKING, Any, Deque, Iterator, Set, Tuple
 
@@ -26,6 +26,7 @@ from cfnlint.helpers import (
     REGION_PRIMARY,
     TRANSFORM_LANGUAGE_EXTENSION,
     TRANSFORM_SAM,
+    init_field_names,
 )
 from cfnlint.schema import PROVIDER_SCHEMA_MANAGER, AttributeDict
 
@@ -103,11 +104,11 @@ class Path:
         elif isinstance(kwargs.get("cfn_path"), int):
             raise ValueError(f"{kwargs['cfn_path']!r} cannot be an integer")
 
-        for f in fields(Path):
-            if kwargs.get(f.name) is not None:
-                kwargs[f.name] = getattr(self, f.name) + deque([kwargs[f.name]])
+        for name in init_field_names(Path):
+            if kwargs.get(name) is not None:
+                kwargs[name] = getattr(self, name) + deque([kwargs[name]])
             else:
-                kwargs[f.name] = getattr(self, f.name)
+                kwargs[name] = getattr(self, name)
 
         return cls(**kwargs)
 
@@ -117,8 +118,8 @@ class Path:
         """
         cls = self.__class__
 
-        for f in fields(Path):
-            kwargs.setdefault(f.name, getattr(self, f.name))
+        for name in init_field_names(Path):
+            kwargs.setdefault(name, getattr(self, name))
 
         return cls(**kwargs)
 
@@ -212,9 +213,8 @@ class Context:
             new_ref_values.update(kwargs["ref_values"])
             kwargs["ref_values"] = new_ref_values
 
-        for f in fields(Context):
-            if f.init:
-                kwargs.setdefault(f.name, getattr(self, f.name))
+        for name in init_field_names(Context):
+            kwargs.setdefault(name, getattr(self, name))
 
         return cls(**kwargs)
 
