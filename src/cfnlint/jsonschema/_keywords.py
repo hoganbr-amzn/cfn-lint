@@ -274,6 +274,10 @@ def dependentExcluded(
 def enum(
     validator: Validator, enums: Any, instance: Any, schema: dict[str, Any]
 ) -> ValidationResult:
+    # A string that is in the list is always equal to that
+    # member so skip the element by element comparison
+    if isinstance(instance, str) and instance in enums:
+        return
     if instance in (0, 1):
         unbooled = unbool(instance)
         if all(not (equal(unbooled, unbool(each))) for each in enums):

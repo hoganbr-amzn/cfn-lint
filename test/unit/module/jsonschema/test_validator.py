@@ -367,6 +367,24 @@ def test_validator(name, schema, instance, expected, validator):
             ],
         ),
         (
+            "valid enum string that looks like a boolean",
+            {"enum": ["true", "false"]},
+            "true",
+            [],
+        ),
+        (
+            "valid enum string against a boolean",
+            {"enum": [True]},
+            "true",
+            [],
+        ),
+        (
+            "enum boolean against a string",
+            {"enum": ["true"]},
+            True,
+            [ValidationError("True is not one of ['true']")],
+        ),
+        (
             "valid enum int",
             {"enum": [0]},
             "0",
