@@ -34,6 +34,51 @@ def _is_satisfiable(cnf: EncodedCNF) -> bool:
     return not cnf.data or bool(satisfiable(cnf))
 
 
+def _has_cycle(references: dict[str, set[str]]) -> bool:
+    """Return whether a condition refers to itself, directly or through
+    other conditions (a topological sort that cannot finish)."""
+    pending = {
+        name: {ref for ref in refs if ref in references}
+        for name, refs in references.items()
+    }
+    referrers: dict[str, list[str]] = {}
+    for name, refs in pending.items():
+        for ref in refs:
+            referrers.setdefault(ref, []).append(name)
+    ready = [name for name, refs in pending.items() if not refs]
+    while ready:
+        name = ready.pop()
+        del pending[name]
+        for referrer in referrers.get(name, ()):
+            pending[referrer].discard(name)
+            if not pending[referrer]:
+                ready.append(referrer)
+    return bool(pending)
+
+
+@dataclass(frozen=True)
+class _ClauseIndex:
+    """Where each clause of the template's CNF came from.
+
+    Lets the solver be handed only the clauses that can decide whether a
+    set of pinned conditions is consistent (see Conditions._relevant_cnf).
+    Clauses are the encoded ``set[int]`` of the CNF they were taken from.
+    """
+
+    # condition name -> clauses of ``Symbol(name) <-> expression``
+    definitions: dict[str, list[set[int]]]
+    # condition name -> names of the conditions its expression uses
+    references: dict[str, set[str]]
+    # condition name -> hashes of the Fn::Equals its expression uses
+    equals: dict[str, set[str]]
+    # Fn::Equals hash -> hash of the reference it compares
+    reference_of: dict[str, str]
+    # reference hash -> clauses saying at most one of its values holds
+    exclusive: dict[str, list[set[int]]]
+    # the parameter AllowedValues clauses
+    allowed_values: list[set[int]]
+
+
 @dataclass(frozen=True)
 class Conditions:
     conditions: dict[str, Condition] = field(init=True, default_factory=dict)
@@ -46,6 +91,9 @@ class Conditions:
     )
     _condition_symbols: dict[str, Symbol] = field(
         init=True, default_factory=dict, compare=False, repr=False
+    )
+    _index: _ClauseIndex | None = field(
+        init=True, default=None, compare=False, repr=False
     )
     # Every condition pinned so far, and the subset pinned as facts (a
     # resource/output Condition, an enclosing Fn::If, a parameter or
@@ -102,11 +150,18 @@ class Conditions:
         # Build EncodedCNF with a Symbol per condition name
         cnf = EncodedCNF()
         condition_symbols: dict[str, Symbol] = {}
+        definitions: dict[str, list[set[int]]] = {}
+        references: dict[str, set[str]] = {}
+        equals_of: dict[str, set[str]] = {}
         for name, cond in obj.items():
             sym = Symbol(name)
             condition_symbols[name] = sym
             # Add equivalence: Symbol(name) <-> condition's boolean expression
+            start = len(cnf.data)
             add_equivalence(cnf, sym, cond.cnf)
+            definitions[name] = cnf.data[start:]
+            references[name] = {str(s) for s in cond.cnf.free_symbols if str(s) in obj}
+            equals_of[name] = {e.hash for e in cond.equals}
 
         # Two Fn::Equals comparing the same single-valued reference (a
         # parameter, with or without AllowedValues, or a pseudo-parameter
@@ -115,6 +170,7 @@ class Conditions:
         # inside the AllowedValues loop below, so plain parameters and
         # pseudo-parameters never got it (issue #4799).
         equals_by_ref: dict[str, dict[str, list[Symbol]]] = {}
+        reference_of: dict[str, str] = {}
         # A condition's equals include those of the conditions it references,
         # so one Fn::Equals can appear many times. Each is encoded only once.
         seen_equals: set[str] = set()
@@ -127,6 +183,7 @@ class Conditions:
                 if i.hash in seen_equals:
                     continue
                 seen_equals.add(i.hash)
+                reference_of[i.hash] = i.right.hash
                 equals_by_ref.setdefault(i.right.hash, {}).setdefault(
                     i.left.instance, []
                 ).append(i.cnf)
@@ -136,9 +193,11 @@ class Conditions:
         # Fn::Equals with different values force different bit patterns and so
         # cannot both be true. This needs n*log2(n) clauses instead of the
         # n*(n-1)/2 of a pairwise encoding.
-        for _, by_value in equals_by_ref.items():
+        exclusive: dict[str, list[set[int]]] = {}
+        for ref_hash, by_value in equals_by_ref.items():
             if len(by_value) < 2:
                 continue
+            start = len(cnf.data)
             width = (len(by_value) - 1).bit_length()
             bits = [Dummy("value_bit") for _ in range(width)]
             for code, value_symbols in enumerate(by_value.values()):
@@ -146,8 +205,10 @@ class Conditions:
                     literal = bit if (code >> k) & 1 else Not(bit)
                     for value_symbol in value_symbols:
                         cnf.add_prop(Or(Not(value_symbol), literal))
+            exclusive[ref_hash] = cnf.data[start:]
 
         # Add parameter AllowedValues constraints
+        start = len(cnf.data)
         for p_k, p_v in parameters.items():
             if not p_v.allowed_values:
                 continue
@@ -165,10 +226,26 @@ class Conditions:
             if not allowed_values and equals_cnfs:
                 cnf.add_prop(Or(*equals_cnfs))
 
+        # _relevant_cnf relies on the conditions forming a DAG. A condition
+        # that refers to itself (directly or through others) is rejected by
+        # CloudFormation, but a template can still contain one; such a
+        # template gets no index and is solved with the full CNF.
+        index: _ClauseIndex | None = None
+        if not _has_cycle(references):
+            index = _ClauseIndex(
+                definitions=definitions,
+                references=references,
+                equals=equals_of,
+                reference_of=reference_of,
+                exclusive=exclusive,
+                allowed_values=cnf.data[start:],
+            )
+
         return cls(
             conditions=obj,
             _cnf=cnf,
             _condition_symbols=condition_symbols,
+            _index=index,
         )
 
     @property
@@ -204,6 +281,75 @@ class Conditions:
         """
         return self._pinned_cnf(self._facts)
 
+    def _relevant_cnf(self, pinned: dict[str, bool]) -> EncodedCNF | None:
+        """Return the part of the template's clauses that decides whether
+        ``pinned`` is consistent, with ``pinned`` added, or None when the
+        whole CNF is needed.
+
+        A condition symbol is defined by one equivalence and appears nowhere
+        else, so a condition that is neither pinned nor used by a pinned one
+        is free and its defining clauses can be left out. An Fn::Equals that
+        no kept condition uses only occurs in the at-most-one clauses of its
+        reference, and in the AllowedValues clauses, both of which the
+        remaining values of that reference can always satisfy on their own
+        (one of them true, the rest false). The at-most-one clauses are kept
+        whole per reference, so a kept Fn::Equals is constrained exactly as
+        in the full CNF.
+        """
+        index = self.root._index
+        if index is None or not set(pinned) <= set(index.definitions):
+            return None
+
+        closure: set[str] = set()
+        stack = list(pinned)
+        while stack:
+            name = stack.pop()
+            if name in closure:
+                continue
+            closure.add(name)
+            stack.extend(index.references[name])
+        data: list[set[int]] = []
+        refs: set[str] = set()
+        for name in closure:
+            data.extend(index.definitions[name])
+            for equals_hash in index.equals[name]:
+                ref_hash = index.reference_of.get(equals_hash)
+                if ref_hash is not None:
+                    refs.add(ref_hash)
+        for ref_hash in refs:
+            data.extend(index.exclusive.get(ref_hash, ()))
+        data.extend(index.allowed_values)
+        encoding = self.root._cnf.encoding
+        for name, value in pinned.items():
+            number = encoding.get(self._condition_symbols[name])
+            if number is None:
+                # The condition's definition added no clause, so its symbol
+                # was never encoded; let add_prop encode it.
+                return None
+            data.append({number if value else -number})
+
+        # Re-number the variables so the solver only sees the ones that
+        # occur in these clauses; it otherwise branches on every unused one.
+        # Literal 0 is sympy's encoding of False and stays as it is.
+        numbers: dict[int, int] = {}
+        compact: list[set[int]] = []
+        for clause in data:
+            compact.append(
+                {
+                    (
+                        0
+                        if literal == 0
+                        else (1 if literal > 0 else -1)
+                        * numbers.setdefault(abs(literal), len(numbers) + 1)
+                    )
+                    for literal in clause
+                }
+            )
+        symbols = self.root._cnf.symbols
+        return EncodedCNF(
+            compact, {symbols[old - 1]: new for old, new in numbers.items()}
+        )
+
     def _pins_satisfiable(self, pins: Pins) -> bool:
         """Return whether the template's clauses allow ``pins``.
 
@@ -212,7 +358,11 @@ class Conditions:
         """
         cache = self.root._satisfiable
         if pins not in cache:
-            cache[pins] = _is_satisfiable(self._pinned_cnf(pins))
+            pinned = dict(pins)
+            cnf = self._relevant_cnf(pinned)
+            if cnf is None:
+                cnf = self._pinned_cnf(pins)
+            cache[pins] = _is_satisfiable(cnf)
         return cache[pins]
 
     def evolve(self, status: dict[str, bool], assumed: bool = False) -> "Conditions":
@@ -271,6 +421,7 @@ class Conditions:
                 conditions=conditions,
                 _cnf=root._cnf,
                 _condition_symbols=root._condition_symbols,
+                _index=root._index,
                 _pins=pins,
                 _facts=facts,
                 _root=root,

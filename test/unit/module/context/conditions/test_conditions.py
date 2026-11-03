@@ -482,6 +482,65 @@ def test_referenced_equals_are_paired_once():
         conditions.evolve({"InGroup0": False, "IsRegion3": True})
 
 
+def test_circular_condition_references():
+    """CloudFormation rejects a condition that refers to itself, directly or
+    through other conditions, but a template can still hold one. Pinning a
+    condition must then give the same answer as solving the whole CNF."""
+    # The definition of IsSelf contradicts itself, so no assignment satisfies
+    # the conditions and pinning an unrelated condition is unsatisfiable too.
+    cfn = Template(
+        None,
+        {
+            "Conditions": {
+                "IsSelf": {"Fn::Not": [{"Condition": "IsSelf"}]},
+                "IsUsEast1": {"Fn::Equals": [{"Ref": "AWS::Region"}, "us-east-1"]},
+            },
+            "Resources": {},
+        },
+        regions=["us-east-1"],
+    )
+    conditions = create_context_for_template(cfn).conditions
+    with pytest.raises(Unsatisfiable):
+        conditions.evolve({"IsUsEast1": True})
+    with pytest.raises(Unsatisfiable):
+        conditions.evolve({"IsUsEast1": False})
+
+    # A cycle that only contradicts itself for one value of another condition:
+    # with IsX true, IsZ equals IsY while IsY is the negation of IsZ.
+    cfn = Template(
+        None,
+        {
+            "Parameters": {"P": {"Type": "String", "Default": "x"}},
+            "Conditions": {
+                "IsX": {"Fn::Equals": [{"Ref": "P"}, "x"]},
+                "IsY": {"Fn::Not": [{"Condition": "IsZ"}]},
+                "IsZ": {"Fn::And": [{"Condition": "IsY"}, {"Condition": "IsX"}]},
+            },
+            "Resources": {},
+        },
+        regions=["us-east-1"],
+    )
+    conditions = create_context_for_template(cfn).conditions
+    assert conditions.evolve({"IsX": False}).status == {"IsX": False}
+    with pytest.raises(Unsatisfiable):
+        conditions.evolve({"IsX": True})
+
+    # A condition that is nothing but a reference to itself adds no clause.
+    cfn = Template(
+        None,
+        {
+            "Conditions": {"IsSelf": {"Condition": "IsSelf"}},
+            "Resources": {},
+        },
+        regions=["us-east-1"],
+    )
+    conditions = create_context_for_template(cfn).conditions
+    pinned = conditions.evolve({"IsSelf": True})
+    assert pinned.status == {"IsSelf": True}
+    with pytest.raises(Unsatisfiable):
+        pinned.evolve({"IsSelf": False})
+
+
 def _count_sat_calls(monkeypatch):
     """Count the SAT solver calls made by the conditions module."""
     import cfnlint.context.conditions._conditions as module
