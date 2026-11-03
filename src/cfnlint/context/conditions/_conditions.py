@@ -84,12 +84,18 @@ class Conditions:
         # inside the AllowedValues loop below, so plain parameters and
         # pseudo-parameters never got it (issue #4799).
         equals_by_ref: dict[str, list[tuple[Symbol, str]]] = {}
+        # A condition's equals include those of the conditions it references,
+        # so one Fn::Equals can appear many times. Each is paired only once.
+        seen_equals: set[str] = set()
         for _, c_v in obj.items():
             for i in c_v.equals:
                 if not isinstance(i.left.instance, str):
                     continue
                 if not isinstance(i.right.instance, dict):
                     continue
+                if i.hash in seen_equals:
+                    continue
+                seen_equals.add(i.hash)
                 seen = equals_by_ref.setdefault(i.right.hash, [])
                 for prev_cnf, prev_val in seen:
                     if prev_val != i.left.instance:

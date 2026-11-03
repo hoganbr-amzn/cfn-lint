@@ -443,3 +443,40 @@ def test_or_of_and_pairs_does_not_explode():
 
     not_prod = conditions.evolve({"IsProd": False})
     assert not_prod.is_reachable("IsDeployed", True) is False
+
+
+def test_referenced_equals_are_paired_once():
+    """Conditions that reference other conditions repeat their Fn::Equals.
+    Each Fn::Equals is constrained against the others only once, so the
+    clause count stays quadratic in the distinct Fn::Equals rather than in
+    every place they appear."""
+    regions = 20
+    region_conditions = {
+        f"IsRegion{i}": {"Fn::Equals": [{"Ref": "AWS::Region"}, f"region-{i}"]}
+        for i in range(regions)
+    }
+    group_conditions = {
+        f"InGroup{g}": {
+            "Fn::Or": [{"Condition": f"IsRegion{i}"} for i in range(regions)]
+        }
+        for g in range(regions)
+    }
+    cfn = Template(
+        None,
+        {
+            "Conditions": {**region_conditions, **group_conditions},
+            "Resources": {},
+        },
+        regions=["us-east-1"],
+    )
+    conditions = create_context_for_template(cfn).conditions
+
+    # 190 region pairs plus the Fn::Or encodings come to about 650 clauses.
+    # Pairing every appearance instead gives about 84,000.
+    assert len(conditions.cnf.data) < 1000
+
+    assert conditions.is_reachable("IsRegion0", True) is True
+    with pytest.raises(Unsatisfiable):
+        conditions.evolve({"IsRegion0": True, "IsRegion1": True})
+    with pytest.raises(Unsatisfiable):
+        conditions.evolve({"InGroup0": False, "IsRegion3": True})
