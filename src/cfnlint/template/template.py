@@ -1246,7 +1246,11 @@ class Template:  # pylint: disable=R0904,too-many-lines,too-many-instance-attrib
                     else:
                         con = con.union(get_conditions_from_property(v))
 
-        return list(self.conditions.build_scenarios(dict.fromkeys(list(con)), region))
+        return list(
+            self.conditions.build_scenarios(
+                dict.fromkeys(sorted(con, key=str)), region
+            )
+        )
 
     def get_conditions_from_path(
         self,

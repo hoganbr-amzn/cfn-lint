@@ -66,6 +66,26 @@ class TestConditions(TestCase):
             cfn.conditions._max_scenarios,
         )
 
+    def test_scenarios_do_not_depend_on_name_order(self):
+        """Past the cap, which scenarios are tried depends only on the
+        condition names, not on the order a caller collected them in"""
+        template = {"Parameters": {}, "Conditions": {}}
+        for i in range(10):
+            template["Parameters"][f"P{i}"] = {"Type": "String"}
+            template["Conditions"][f"C{i}"] = {
+                "Fn::Equals": [{"Ref": f"P{i}"}, "x"]
+            }
+        cfn = Template("", template)
+        names = [f"C{i}" for i in range(10)]
+        forward = list(cfn.conditions.build_scenarios(dict.fromkeys(names)))
+        backward = list(cfn.conditions.build_scenarios(dict.fromkeys(names[::-1])))
+        self.assertEqual(len(forward), cfn.conditions._max_scenarios)
+        # assertTrue: a failing assertEqual would diff 128 long lists
+        self.assertTrue(
+            [sorted(s.items()) for s in forward]
+            == [sorted(s.items()) for s in backward]
+        )
+
     def test_check_implies(self):
         """We properly validate implies scenarios"""
         template = {
@@ -132,9 +152,10 @@ class TestConditions(TestCase):
         self.assertEqual(len(cfn.conditions._conditions), 2)
         self.assertListEqual(
             list(cfn.conditions.build_scenarios({"IsProd": None, "IsDev": None})),
+            # scenarios follow the sorted condition names
             [
-                {"IsProd": True, "IsDev": False},
-                {"IsProd": False, "IsDev": True},
+                {"IsDev": True, "IsProd": False},
+                {"IsDev": False, "IsProd": True},
             ],
         )
 
@@ -156,9 +177,10 @@ class TestConditions(TestCase):
         self.assertEqual(len(cfn.conditions._conditions), 2)
         self.assertListEqual(
             list(cfn.conditions.build_scenarios({"IsProd": None, "IsDev": None})),
+            # scenarios follow the sorted condition names
             [
-                {"IsProd": True, "IsDev": False},
-                {"IsProd": False, "IsDev": True},
+                {"IsDev": True, "IsProd": False},
+                {"IsDev": False, "IsProd": True},
                 {"IsProd": False, "IsDev": False},
             ],
         )

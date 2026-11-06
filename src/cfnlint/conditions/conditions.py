@@ -278,6 +278,9 @@ class Conditions:
                     conditions_set[condition_name] = False
                     continue
             condition_names.append(condition_name)
+        # Callers collect names in sets; sort them so the scenarios tried
+        # before the cap, and their order, do not depend on the hash seed.
+        condition_names.sort(key=str)
 
         try:
             # build a large matric of True/False options

@@ -670,3 +670,38 @@ def test_solver_calls_do_not_grow_with_reused_conditions():
 
     assert calls[0] > 0
     assert calls[0] == calls[1]
+
+
+def test_scenarios_do_not_depend_on_name_order():
+    """Past the cap, the scenarios evolve_from_instance enumerates depend only
+    on the condition names, not on set iteration order (hash seed)."""
+    names = [f"C{i}" for i in range(10)]
+    cfn = Template(
+        "",
+        {
+            "Parameters": {f"P{i}": {"Type": "String"} for i in range(10)},
+            "Conditions": {
+                f"C{i}": {"Fn::Equals": [{"Ref": f"P{i}"}, "x"]} for i in range(10)
+            },
+            "Resources": {},
+        },
+    )
+    context = create_context_for_template(cfn)
+
+    def scenarios(order):
+        class _Ordered(set):
+            def __iter__(self):
+                return iter(order)
+
+        with patch(
+            "cfnlint.context.conditions._conditions.get_conditions_from_property",
+            return_value=_Ordered(order),
+        ):
+            return [
+                sorted(s.status.items())
+                for _, s in context.conditions.evolve_from_instance({}, context)
+            ]
+
+    forward = scenarios(names)
+    assert len(forward) == 128
+    assert forward == scenarios(names[::-1])
