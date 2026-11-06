@@ -12,6 +12,8 @@ from typing import Any, Iterable
 from sympy.assumptions.cnf import EncodedCNF
 from sympy.logic.inference import satisfiable
 
+from cfnlint.conditions._incremental import make_backend
+
 
 def _product(n: int):
     return product((True, False), repeat=n)
@@ -46,8 +48,12 @@ class PinSolver:
     touched ones are solved together with the pins.
     """
 
-    def __init__(self, cnf: EncodedCNF) -> None:
+    def __init__(self, cnf: EncodedCNF, incremental: bool = False) -> None:
         self._cnf = cnf
+        # one persistent incremental solver per component instead of a
+        # copy-and-solve through sympy per question
+        self._incremental = incremental
+        self._backends: list[Any] | None = None
         self._answers: dict[frozenset[tuple[int, bool]], bool] = {}
         self._models: dict[Any, tuple[list[tuple[bool, ...]], bool]] = {}
         # how many enumerations hit their limit (observable truncation)
@@ -79,6 +85,8 @@ class PinSolver:
         if self._components is None:
             self._split()
         assert self._components is not None
+        if self._backends is not None:
+            return self._solve_incremental(pins)
         if not pins:
             return all(
                 self._is_satisfiable(component.clauses, component.size)
@@ -108,6 +116,52 @@ class PinSolver:
             index, number = self._position[variable]
             number += offset[index]
             clauses.append({number if value else -number})
+        return self._is_satisfiable(clauses, size)
+
+    def _solve_incremental(self, pins: frozenset[tuple[int, bool]]) -> bool:
+        """Each component keeps one loaded solver; a question is answered by
+        solving every touched component under its pins as assumptions."""
+        assert self._backends is not None
+        if not pins:
+            return all(backend.solve(()) for backend in self._backends)
+        if frozenset() not in self._answers:
+            self._answers[frozenset()] = self._solve(frozenset())
+        if not self._answers[frozenset()]:
+            return False
+        return self.solve_components((), pins)
+
+    def solve_components(
+        self, indices: Iterable[int], pins: Iterable[tuple[int, bool]]
+    ) -> bool:
+        """Whether the components ``indices`` and those the (encoded) pins
+        touch are satisfiable together with the pins, without the check that
+        the rest of the CNF is.  Used by the point solver for the components
+        it routes to SAT."""
+        if self._components is None:
+            self._split()
+        grouped: dict[int, list[int]] = {index: [] for index in indices}
+        for variable, value in pins:
+            index, number = self._position[variable]
+            grouped.setdefault(index, []).append(number if value else -number)
+        if self._backends is not None:
+            return all(
+                self._backends[index].solve(sorted(assumptions))
+                for index, assumptions in sorted(grouped.items())
+            )
+        assert self._components is not None
+        clauses: list[set[int]] = []
+        size = 0
+        for index, assumptions in sorted(grouped.items()):
+            component = self._components[index]
+            clauses.extend(
+                {lit + size if lit > 0 else lit - size for lit in clause}
+                for clause in component.clauses
+            )
+            for lit in assumptions:
+                clauses.append({lit + size if lit > 0 else lit - size})
+            size += component.size
+        if not clauses:
+            return True
         return self._is_satisfiable(clauses, size)
 
     def models(
@@ -167,6 +221,8 @@ class PinSolver:
             self._answers[frozenset()] = self._solve(frozenset())
         if not self._answers[frozenset()]:
             return [], False
+        if self._backends is not None:
+            return self._enumerate_incremental(pins, free, limit)
         variables = {v for v, _ in pins} | set(free)
         touched = sorted({self._position[v][0] for v in variables})
         offset: dict[int, int] = {}
@@ -208,6 +264,61 @@ class PinSolver:
             clauses.append(
                 {-n if value else n for n, value in zip(numbers, assignment)}
             )
+
+    def _enumerate_incremental(
+        self, pins: frozenset[tuple[int, bool]], free: list[int], limit: int
+    ) -> tuple[list[tuple[bool, ...]], bool]:
+        """Depth-first over ``free`` in order, True before False, keeping a
+        prefix only when the components it touches stay satisfiable under
+        the pins and the prefix as assumptions.  Yields the lexicographically
+        first ``limit`` assignments (True first), exactly, and whether more
+        exist.  Each step is one assumption solve on one component."""
+        assert self._backends is not None
+        backends = self._backends
+        base: dict[int, list[int]] = {}
+        for variable, value in pins:
+            index, number = self._position[variable]
+            base.setdefault(index, []).append(number if value else -number)
+        where = [self._position[v] for v in free]
+        assigned: dict[int, list[int]] = {}
+        cache: dict[tuple[int, tuple[int, ...]], bool] = {}
+
+        def feasible(index: int) -> bool:
+            assumptions = tuple(sorted(base.get(index, []) + assigned.get(index, [])))
+            key = (index, assumptions)
+            answer = cache.get(key)
+            if answer is None:
+                answer = cache[key] = backends[index].solve(assumptions)
+            return answer
+
+        # the pins alone
+        for index in base:
+            if not feasible(index):
+                return [], False
+        found: list[tuple[bool, ...]] = []
+        current: list[bool] = []
+        n = len(free)
+
+        def descend(depth: int) -> bool:
+            # returns True to stop (limit + 1 reached)
+            if depth == n:
+                if len(found) >= limit:
+                    return True
+                found.append(tuple(current))
+                return False
+            index, number = where[depth]
+            for value in (True, False):
+                assigned.setdefault(index, []).append(number if value else -number)
+                current.append(value)
+                stop = feasible(index) and descend(depth + 1)
+                current.pop()
+                assigned[index].pop()
+                if stop:
+                    return True
+            return False
+
+        truncated = descend(0)
+        return found, truncated
 
     @staticmethod
     def _is_satisfiable(clauses: list[set[int]], size: int) -> bool:
@@ -261,3 +372,8 @@ class PinSolver:
         self._components = [
             _Component(clauses, size) for clauses, size in zip(components, sizes)
         ]
+        if self._incremental:
+            self._backends = [
+                make_backend(component.clauses, component.size)
+                for component in self._components
+            ]

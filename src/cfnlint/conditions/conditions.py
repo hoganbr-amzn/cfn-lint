@@ -18,7 +18,7 @@ from cfnlint.conditions._condition import ConditionNamed, _Memo
 from cfnlint.conditions._equals import Equal, EqualParameter
 from cfnlint.conditions._errors import UnknownSatisfisfaction
 from cfnlint.conditions._rule import Rule
-from cfnlint.conditions._solver import PinSolver
+from cfnlint.conditions._points import PointModel, fold, make_solver
 from cfnlint.conditions._utils import (
     add_at_most_one,
     add_constraint,
@@ -40,11 +40,14 @@ class Conditions:
         self._parameters: dict[str, list[str]] = {}
         self._rules: list[Rule] = []
         self._memo = _Memo()
+        self._model = PointModel()
+        self._mappings = cfn.template.get("Mappings")
         self._init_conditions(cfn=cfn)
         self._init_parameters(cfn=cfn)
         self._init_rules(cfn=cfn)
         self._cnf, self._solver_params = self._build_cnf(list(self._conditions.keys()))
-        self._solver = PinSolver(self._cnf)
+        self._init_model(cfn)
+        self._solver = make_solver(self._cnf, self._model)
 
     def _init_conditions(self, cfn):
         conditions = cfn.template.get("Conditions")
@@ -85,6 +88,22 @@ class Conditions:
             for allowed_value in allowed_values:
                 if isinstance(allowed_value, (str, int, float, bool)):
                     self._parameters[param_hash].append(get_hash(str(allowed_value)))
+
+    def _init_model(self, cfn: Any) -> None:
+        parameters = cfn.template.get("Parameters")
+        if not isinstance(parameters, dict):
+            parameters = {}
+        for name, parameter in parameters.items():
+            self._model.plain_refs.add(get_hash({"Ref": name}))
+            if not isinstance(parameter, dict):
+                continue
+            allowed = parameter.get("AllowedValues")
+            if allowed and isinstance(allowed, list):
+                values = [
+                    str(v) for v in allowed if isinstance(v, (str, int, float, bool))
+                ]
+                if values and len(values) == len(allowed):
+                    self._model.domains[get_hash({"Ref": name})] = values
 
     def _init_rules(self, cfn: Any) -> None:
         rules = cfn.template.get("Rules")
@@ -234,11 +253,30 @@ class Conditions:
                     build_params[other_name] = other_sym
             cond_expr = self._conditions[condition_name].build_cnf(build_params)
             add_equivalence(cnf, cond_sym, cond_expr)
+            self._model.defs[cond_sym] = cond_expr
 
         equal_vars.update(cond_symbols)
 
         for rule in self._rules:
-            add_constraint(cnf, rule.build_cnf(equal_vars))
+            rule_expr = rule.build_cnf(equal_vars)
+            add_constraint(cnf, rule_expr)
+            if rule_expr is not None:
+                self._model.constraints.append(rule_expr)
+
+        mappings = self._mappings
+
+        def _term(side):
+            if isinstance(side, str):
+                return ("L", side)
+            folded = fold(side._value, mappings)
+            if folded is not None:
+                return ("L", folded)
+            return ("R", side.hash)
+
+        for e_hash, e_equal in equals.items():
+            var = equal_vars[e_hash]
+            if isinstance(var, Symbol):
+                self._model.add_atom(var, _term(e_equal.left), _term(e_equal.right))
 
         return (cnf, equal_vars)
 

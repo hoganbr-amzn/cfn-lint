@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any, Iterator
 from sympy import And, Implies, Not, Or, Symbol
 from sympy.assumptions.cnf import EncodedCNF
 
+from cfnlint.conditions._points import PointModel, cfn_str, fold, make_solver
 from cfnlint.conditions._solver import PinSolver
 from cfnlint.conditions._utils import (
     add_at_most_one,
@@ -88,7 +89,7 @@ class Conditions:
 
     def _is_satisfiable(self, pins: frozenset[tuple[str, bool]]) -> bool:
         if self._solver is None:
-            object.__setattr__(self, "_solver", PinSolver(self._base_cnf))
+            object.__setattr__(self, "_solver", make_solver(self._base_cnf, None))
         return self._solver.satisfiable(
             (self._condition_symbols[name], value) for name, value in pins
         )
@@ -99,6 +100,7 @@ class Conditions:
         conditions: Any,
         rules: dict[str, dict],
         parameters: dict[str, "Parameter"],
+        mappings: Any = None,
     ) -> "Conditions":
         obj: dict[str, Condition] = {}
         if not isinstance(conditions, dict):
@@ -214,11 +216,53 @@ class Conditions:
         for expr in rule_exprs:
             add_constraint(cnf, expr)
 
+        model = PointModel()
+        for name, cond in obj.items():
+            model.defs[condition_symbols[name]] = cond.cnf
+
+        def _term(side, raw):
+            # EqualParameter stringifies a YAML boolean as Python does
+            # ("True"); compare it as CloudFormation does ("true"), the way
+            # the AllowedValues domains below are written (ledger A12)
+            if isinstance(raw, bool):
+                return ("L", cfn_str(raw, cfn_bools=True))
+            inst = side.instance
+            if isinstance(inst, str):
+                return ("L", inst)
+            folded = fold(inst, mappings, cfn_bools=True)
+            if folded is not None:
+                return ("L", folded)
+            return ("R", side.hash)
+
+        for p_k in parameters:
+            model.plain_refs.add(get_hash({"Ref": p_k}))
+        for i in distinct_equals.values():
+            if i.left.instance is None or i.right.instance is None:
+                model.add_free(i.cnf)
+                continue
+            for side in (i.left, i.right):
+                inst = side.instance
+                if isinstance(inst, dict) and len(inst) == 1:
+                    ref = inst.get("Ref")
+                    if isinstance(ref, str) and ref.startswith("AWS::"):
+                        model.plain_refs.add(side.hash)
+            raw = i.instance if isinstance(i.instance, list) else [None, None]
+            model.add_atom(i.cnf, _term(i.left, raw[0]), _term(i.right, raw[1]))
+        for p_k, p_v in parameters.items():
+            av = p_v.allowed_values
+            if av and isinstance(av, list) and all(
+                isinstance(v, (str, int, float, bool)) for v in av
+            ):
+                model.domains[get_hash({"Ref": p_k})] = [
+                    cfn_str(v, cfn_bools=True) for v in av
+                ]
+        model.constraints.extend(rule_exprs)
+
         return cls(
             conditions=obj,
             _base_cnf=cnf,
             _condition_symbols=condition_symbols,
-            _solver=PinSolver(cnf),
+            _solver=make_solver(cnf, model),
         )
 
     def evolve(self, status: dict[str, bool], assumed: bool = False) -> "Conditions":
@@ -318,7 +362,7 @@ class Conditions:
             yield self
             return
         if self._solver is None:
-            object.__setattr__(self, "_solver", PinSolver(self._base_cnf))
+            object.__setattr__(self, "_solver", make_solver(self._base_cnf, None))
         assert self._solver is not None
         models, _ = self._solver.models(
             [(self._condition_symbols[n], v) for n, v in sorted(self._pins)],
