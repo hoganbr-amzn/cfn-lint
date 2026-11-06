@@ -260,6 +260,118 @@ class TestWorkIsNodeEvaluations(TestCase):
         self.assertTrue(self._ask(cfn, [("Other", False), ("Is1", True)]))
 
 
+def proj_subsets(n, m=12):
+    """m free parameters (2 ** m points, one component); W_i reads every
+    parameter; n queues each set 8 Fn::If properties on a distinct 8-subset
+    of the W_i, so every queue is a new scenario question."""
+    import itertools
+
+    conds = {f"E{i}": _eq(_ref(f"P{i}"), "a") for i in range(m)}
+    for i in range(m):
+        terms = [_cond(f"E{i}")]
+        for d in range(1, m):
+            j, k = (i + d) % m, (i + d + 1) % m
+            terms.append({"Fn::And": [_cond(f"E{j}"), {"Fn::Not": [_cond(f"E{k}")]}]})
+        conds[f"W{i}"] = {"Fn::Or": terms}
+    props = [
+        "DelaySeconds",
+        "MaximumMessageSize",
+        "MessageRetentionPeriod",
+        "ReceiveMessageWaitTimeSeconds",
+        "VisibilityTimeout",
+        "KmsDataKeyReusePeriodSeconds",
+        "SqsManagedSseEnabled",
+        "QueueName",
+    ]
+    subsets = list(itertools.combinations(range(m), 8))
+    res = {}
+    for q in range(n):
+        res[f"Queue{q}"] = {
+            "Type": "AWS::SQS::Queue",
+            "Properties": {
+                name: {"Fn::If": [f"W{wi}", f"q{q}-{name}-a", f"q{q}-{name}-b"]}
+                for name, wi in zip(props, subsets[q % len(subsets)])
+            },
+        }
+    return {
+        "Parameters": {f"P{i}": {"Type": "String"} for i in range(m)},
+        "Conditions": conds,
+        "Resources": res,
+    }
+
+
+class TestScenarioProjection(TestCase):
+    """W1 P3: scenario enumeration over a small component answers from one
+    truth table per component instead of walking its points once per
+    distinct question; a large component's per-question projection is
+    capped and then goes prefix by prefix."""
+
+    def setUp(self):
+        if points.ENGINE not in ("hybrid", "pp"):
+            self.skipTest("point engine not selected")
+        self._proj = points.PROJ_BUDGET
+
+    def tearDown(self):
+        points.PROJ_BUDGET = self._proj
+
+    @staticmethod
+    def _questions(cfn, n):
+        import itertools
+
+        m = sum(1 for name in cfn.template["Conditions"] if name.startswith("W"))
+        subsets = list(itertools.combinations(range(m), 8))
+        for q in range(n):
+            yield [f"W{i}" for i in subsets[q % len(subsets)]]
+
+    def _check_against_cnf(self, cfn, n):
+        legacy = cfn.conditions
+        reference = PinSolver(legacy._cnf, incremental=True)
+        for names in self._questions(cfn, n):
+            free = [legacy._solver_params[x] for x in names]
+            for pins in ([], [(legacy._solver_params["E0"], True)]):
+                got = legacy._solver.models(pins, free, 128)
+                want = reference.models(pins, free, 128)
+                self.assertEqual(got, want, names)
+
+    def test_small_component_answers_from_one_table(self):
+        cfn = Template("", proj_subsets(40), ["us-east-1"])
+        solver = cfn.conditions._solver
+        self._check_against_cnf(cfn, 40)
+        (component,) = solver._components
+        self.assertEqual(component.points, 4096)
+        self.assertIsNotNone(component.columns)
+        # every W_i has a column by now; further distinct questions and
+        # satisfiability checks evaluate no node at all
+        work = solver._work
+        for names in self._questions(cfn, 495):
+            syms = [cfn.conditions._solver_params[x] for x in names]
+            solver.models([], syms, 128)
+            solver.satisfiable([(syms[0], True), (syms[1], False)])
+        self.assertEqual(solver._work, work)
+
+    def test_large_component_projection_is_capped(self):
+        points.PROJ_BUDGET = 2000
+        template = proj_subsets(30)
+        # a 13th parameter joined to the component doubles its points past
+        # ENUM_MAX while every question still reads the first twelve
+        template["Parameters"]["P12"] = {"Type": "String"}
+        template["Conditions"]["E12"] = _eq(_ref("P12"), "a")
+        template["Conditions"]["X"] = {"Fn::And": [_cond("E12"), _cond("W0")]}
+        cfn = Template("", template, ["us-east-1"])
+        solver = cfn.conditions._solver
+        self.assertTrue(solver.satisfiable([]))  # builds the components
+        (component,) = solver._components
+        self.assertGreater(component.points, points.ENUM_MAX)
+        self._check_against_cnf(cfn, 30)
+        self.assertIsNone(component.columns)
+        self.assertGreater(component.projected, 2000)
+        # the cap was reached, so later questions walk prefixes with the
+        # component's own search and projection work stays where it was
+        projected = component.projected
+        self._check_against_cnf(cfn, 30)
+        self.assertEqual(component.projected, projected)
+
+
 class TestRefVsRefExclusion(TestCase):
     """W1 A1/A2: a Ref-vs-Ref Fn::Equals is not exclusive with a literal
     Fn::Equals on the same parameter, so the CNF must not say NAND(P == Q,

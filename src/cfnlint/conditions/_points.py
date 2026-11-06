@@ -68,6 +68,9 @@ STEP_BUDGET = int(os.environ.get("CFNLINT_PP_BUDGET", "200000"))
 # after this many searches ran out of budget, the rest of the lint is SAT
 MAX_TRIPS = int(os.environ.get("CFNLINT_PP_MAX_TRIPS", "10"))
 MAX_REFS = 400  # recursion depth guard
+# node evaluations a large component may spend projecting the points its
+# scenario questions read before those questions go prefix by prefix
+PROJ_BUDGET = STEP_BUDGET * 10
 
 _STATS: dict[str, Any] = {
     "engine": ENGINE,
@@ -225,6 +228,15 @@ class _Component:
         self.points = 1
         self.cnf_indices: set[int] = set()
         self.answers: dict[frozenset, bool] = {}
+        # truth table of a small component: point index -> bit, one column
+        # (an int) per symbol asked so far; built on first use
+        self.columns: dict[Any, int] | None = None
+        self.table_refs: list = []
+        self.all_points = 0
+        self.rules_mask = 0
+        # node evaluations spent projecting per-question point sets for a
+        # component too large for a table
+        self.projected = 0
 
 
 class PointSolver:
@@ -512,6 +524,14 @@ class PointSolver:
         if c.route == "sat":
             _STATS["sat_queries"] += 1
             ans = self._sat(c.cnf_indices, pins)
+        elif c.columns is not None:
+            # a small component already tabulated for scenario enumeration
+            _STATS["pp_queries"] += 1
+            mask = c.rules_mask
+            for sym, value in pins:
+                col = self._column(c, self._node_of(sym))
+                mask &= col if value else c.all_points & ~col
+            ans = mask != 0
         else:
             _STATS["pp_queries"] += 1
             try:
@@ -750,11 +770,68 @@ class PointSolver:
             return ("a", sym)
         return ("f", sym)
 
+    def _column(self, c: _Component, node) -> int:
+        """Bitmask over the points of a small component of where ``node`` is
+        true; the component's points are indexed in product order over its
+        references.  One pass over the points per node, kept for the lint."""
+        assert c.columns is not None
+        key = node[1] if node[0] in ("a", "d", "f") else id(node)
+        col = c.columns.get(key)
+        if col is None:
+            col = 0
+            bit = 1
+            refs = c.table_refs
+            for point in itertools.product(*[self._cand[r] for r in refs]):
+                if self._eval(node, dict(zip(refs, point)), {}):
+                    col |= bit
+                bit <<= 1
+            c.columns[key] = col
+        return col
+
+    def _table_oracle(self, c: _Component, pins: list, free: list):
+        """A prefix-feasibility test over the truth table of a small
+        component (at most ENUM_MAX points): the points allowed by ``pins``
+        and the component's Rules, split by each asked symbol in turn.  The
+        table is shared by every question about the component, so a
+        template with many distinct questions pays one pass per symbol."""
+        if c.columns is None:
+            c.columns = {}
+            c.table_refs = sorted(c.refs, key=repr)
+            c.all_points = (1 << c.points) - 1
+            mask = c.all_points
+            for node in c.constraints:
+                mask &= self._column(c, node)
+            c.rules_mask = mask
+        mask = c.rules_mask
+        for sym, value in pins:
+            col = self._column(c, self._node_of(sym))
+            mask &= col if value else c.all_points & ~col
+        columns = [self._column(c, self._node_of(sym)) for sym in free]
+        masks: dict[tuple, int] = {(): mask}
+
+        def feasible(prefix: tuple) -> bool:
+            m = masks.get(prefix)
+            if m is None:
+                parent = masks[prefix[:-1]]
+                col = columns[len(prefix) - 1]
+                m = parent & col if prefix[-1] else parent & ~col
+                masks[prefix] = m
+            return m != 0
+
+        return feasible
+
     def _projection(self, c: _Component, pins: list, free: list):
-        """The set of prefixes of the distinct assignments of ``free`` (all in
-        component ``c``) over the points that satisfy ``pins`` and the
-        component's Rules, or None when the point product over the
-        references they read is above ENUM_MAX."""
+        """A prefix-feasibility test for the distinct assignments of ``free``
+        (all in component ``c``) over the points that satisfy ``pins`` and
+        the component's Rules, or None when the question is better asked
+        prefix by prefix: a small component answers from its truth table;
+        a larger one enumerates the points over the references the question
+        reads, when there are at most ENUM_MAX of them and the component has
+        not spent PROJ_BUDGET node evaluations on such projections."""
+        if c.points <= ENUM_MAX:
+            return self._table_oracle(c, pins, free)
+        if c.projected > PROJ_BUDGET:
+            return None
         items = [(self._node_of(s), v) for s, v in pins]
         items += [(node, True) for node in c.constraints]
         nodes = [self._node_of(s) for s in free]
@@ -769,6 +846,7 @@ class PointSolver:
             size *= len(self._cand[r])
             if size > ENUM_MAX:
                 return None
+        start = self._work
         prefixes: set = {()}
         cand = [self._cand[r] for r in refs]
         for point in itertools.product(*cand):
@@ -783,10 +861,12 @@ class PointSolver:
                 continue
             values = tuple(self._eval(node, vals, memo) for node in nodes)
             if None in values:
+                c.projected += self._work - start
                 return None
             for j in range(1, len(values) + 1):
                 prefixes.add(values[:j])
-        return prefixes
+        c.projected += self._work - start
+        return prefixes.__contains__
 
     def models(
         self,
@@ -847,9 +927,9 @@ class PointSolver:
 
         def feasible(c: _Component, assigned: dict[int, list]) -> bool:
             cid = id(c)
-            prefixes = oracle[cid]
-            if prefixes is not None:
-                return tuple(v for _, v in assigned[cid]) in prefixes
+            test = oracle[cid]
+            if test is not None:
+                return test(tuple(v for _, v in assigned[cid]))
             return self._solve(c, comp_pins.get(cid, []) + assigned[cid])
 
         def walk(first: bool) -> Iterator[tuple[bool, ...]]:
