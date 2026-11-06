@@ -10,7 +10,8 @@ from dataclasses import dataclass, field
 from functools import cmp_to_key
 from typing import Any
 
-from sympy import Symbol
+from sympy import Symbol, false, true
+from sympy.logic.boolalg import BooleanAtom
 
 from cfnlint.conditions._utils import cfn_string, get_hash
 from cfnlint.helpers import is_function
@@ -82,7 +83,7 @@ class Equal:
 
     is_static: bool | None = field(init=False, default=None)
 
-    cnf: Symbol = field(init=False)
+    cnf: Symbol | BooleanAtom = field(init=False)
 
     @classmethod
     def create_from_instance(cls, instance: Any) -> "Equal":
@@ -108,7 +109,19 @@ class Equal:
             object.__setattr__(
                 self, "is_static", self.left.instance == self.right.instance
             )
-        object.__setattr__(self, "cnf", Symbol(self.hash))
+        elif (
+            isinstance(self.left.instance, dict)
+            and isinstance(self.right.instance, dict)
+            and self.left.hash == self.right.hash
+        ):
+            # the same reference or function on both sides
+            object.__setattr__(self, "is_static", True)
+        # A static Fn::Equals is a constant, as in the template-level engine;
+        # a free Symbol would let it take either value.
+        if self.is_static is None:
+            object.__setattr__(self, "cnf", Symbol(self.hash))
+        else:
+            object.__setattr__(self, "cnf", true if self.is_static else false)
 
     @property
     def parameters(self) -> list[EqualParameter]:

@@ -769,6 +769,30 @@ def test_self_equals_does_not_exclude_other_equals(reverse):
     assert sorted(m.rule.id for m in matches) == ["E3019", "E3019", "W8003"]
 
 
+@pytest.mark.parametrize(
+    "equals,always",
+    [
+        (["Prod", "Prod"], True),
+        (["Prod", "Dev"], False),
+        ([{"Ref": "P"}, {"Ref": "P"}], True),
+    ],
+)
+def test_static_equals_is_a_constant(equals, always):
+    """A static Fn::Equals has one value, as in the template-level engine."""
+    cfn = Template(
+        "",
+        {
+            "Parameters": {"P": {"Type": "String"}},
+            "Conditions": {"Static": {"Fn::Equals": equals}},
+            "Resources": {},
+        },
+    )
+    conditions = create_context_for_template(cfn).conditions
+    assert conditions.is_reachable("Static", always)
+    assert not conditions.is_reachable("Static", not always)
+    assert cfn.conditions.is_always_true("Static") is always
+
+
 def test_true_and_one_are_different_equals():
     """Fn::Equals [Ref P, true] and Fn::Equals [Ref P, 1] compare P with the
     strings "true" and "1", so they are two Fn::Equals with two solver
