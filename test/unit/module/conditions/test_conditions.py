@@ -3,8 +3,10 @@ Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 SPDX-License-Identifier: MIT-0
 """
 
+import itertools
 import string
 from unittest import TestCase
+from unittest.mock import patch
 
 from cfnlint.conditions import UnknownSatisfisfaction
 from cfnlint.conditions._utils import get_hash
@@ -661,3 +663,64 @@ class TestConditions(TestCase):
             list(cfn.conditions.build_scenarios({"One": None, "Two": None})),
             [{"One": True, "Two": False}, {"One": False, "Two": True}],
         )
+
+
+class TestScenarioEnumeration(TestCase):
+    """build_scenarios enumerates the satisfiable scenarios only."""
+
+    def test_only_satisfiable_scenarios_are_solved(self):
+        n = 12
+        cfn = Template(
+            "",
+            {
+                "Parameters": {
+                    "P": {
+                        "Type": "String",
+                        "AllowedValues": [f"v{i}" for i in range(n)],
+                    }
+                },
+                "Conditions": {
+                    f"Is{i}": {"Fn::Equals": [{"Ref": "P"}, f"v{i}"]} for i in range(n)
+                },
+            },
+        )
+        solver = cfn.conditions._solver
+        with patch.object(
+            type(solver), "_solve", autospec=True, side_effect=type(solver)._solve
+        ) as solve:
+            scenarios = list(
+                cfn.conditions.build_scenarios({f"Is{i}": None for i in range(n)})
+            )
+        # exactly one condition is true in each scenario, so n of the 2 ** n
+        # assignments, and nothing like 2 ** n of them is asked about
+        self.assertEqual(len(scenarios), n)
+        for scenario in scenarios:
+            self.assertEqual(sum(scenario.values()), 1)
+        self.assertLess(solve.call_count, 20 * n)
+
+    def test_truncated_scenarios_keep_both_ends_of_the_order(self):
+        """Past the cap, the scenarios are taken alternately from the two
+        ends of the True-first order over the sorted condition names, so the
+        all-true and the all-false scenarios are both kept whatever the
+        solver."""
+        n = 10
+        names = [f"C{i}" for i in range(n)]
+        cfn = Template(
+            "",
+            {
+                "Parameters": {f"P{i}": {"Type": "String"} for i in range(n)},
+                "Conditions": {
+                    f"C{i}": {"Fn::Equals": [{"Ref": f"P{i}"}, "x"]} for i in range(n)
+                },
+            },
+        )
+        scenarios = {
+            tuple(scenario[name] for name in names)
+            for scenario in cfn.conditions.build_scenarios(dict.fromkeys(names))
+        }
+        self.assertEqual(len(scenarios), cfn.conditions._max_scenarios)
+        everything = sorted(
+            itertools.product((True, False), repeat=n),
+            key=lambda m: tuple(not v for v in m),
+        )
+        self.assertEqual(scenarios, set(everything[:64]) | set(everything[-64:]))

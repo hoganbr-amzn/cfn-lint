@@ -5,7 +5,6 @@ SPDX-License-Identifier: MIT-0
 
 from __future__ import annotations
 
-import itertools
 import logging
 import traceback
 from functools import lru_cache
@@ -320,35 +319,27 @@ class Conditions:
         if any(name not in self._conditions for name in condition_names):
             return
 
-        # build a large matric of True/False options
-        # based on the provided conditions
-        scenarios_attempted = 0
+        pins = list(fixed_pins)
         if region:
-            # each condition takes the values it can have in the region
-            products = itertools.product(
-                *[
-                    self.build_scenerios_on_region(name, region)
-                    for name in condition_names
-                ]
+            for condition in self._conditions.values():
+                pins.extend(self._region_pins(condition.equals, region))
+        symbols = [self._solver_params[name] for name in condition_names]
+        solver_pins = self._solver_pins(pins)
+        if solver_pins is None:
+            return
+        # Enumerate the satisfiable scenarios only, in a deterministic order,
+        # at most _max_scenarios of them.
+        models, truncated = self._solver.models(
+            solver_pins, symbols, self._max_scenarios
+        )
+        if truncated:
+            LOGGER.debug(
+                "Condition scenarios truncated at %s for %s",
+                self._max_scenarios,
+                condition_names,
             )
-        else:
-            products = itertools.product([True, False], repeat=len(condition_names))  # type: ignore
-
-        for p in products:
-            pins = list(fixed_pins)
-            params = dict(zip(condition_names, p))
-            for condition_name, opt in params.items():
-                pins.append((self._solver_params[condition_name], bool(opt)))
-
-            # if the scenario can be satisfied then return it
-            if self._satisfiable(pins):
-                yield {**params, **conditions_set}
-
-            scenarios_attempted += 1
-            # On occassions people will use a lot of non-related conditions
-            # this is fail safe to limit the maximum number of responses
-            if scenarios_attempted >= self._max_scenarios:
-                return
+        for model in models:
+            yield {**dict(zip(condition_names, model)), **conditions_set}
 
     def check_implies(self, scenarios: dict[str, bool], implies: str) -> bool:
         """Based on a bunch of scenario conditions and their Truth/False value

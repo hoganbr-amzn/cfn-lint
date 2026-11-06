@@ -3,6 +3,7 @@ Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 SPDX-License-Identifier: MIT-0
 """
 
+import itertools
 import json
 from unittest.mock import patch
 
@@ -703,6 +704,39 @@ def test_scenarios_do_not_depend_on_name_order():
     forward = scenarios(names)
     assert len(forward) == 128
     assert forward == scenarios(names[::-1])
+
+
+def test_truncated_scenarios_keep_both_ends_of_the_order():
+    """Past the cap, the scenarios are taken alternately from the two ends
+    of the True-first order over the sorted condition names, so a nested
+    Fn::If's first branch (its condition true) and its last leaf (every
+    condition false) are both resolved whatever the solver."""
+    names = [f"C{i}" for i in range(10)]
+    cfn = Template(
+        "",
+        {
+            "Parameters": {f"P{i}": {"Type": "String"} for i in range(10)},
+            "Conditions": {
+                f"C{i}": {"Fn::Equals": [{"Ref": f"P{i}"}, "x"]} for i in range(10)
+            },
+            "Resources": {},
+        },
+    )
+    context = create_context_for_template(cfn)
+    with patch(
+        "cfnlint.context.conditions._conditions.get_conditions_from_property",
+        return_value=set(names),
+    ):
+        scenarios = {
+            tuple(s.status[n] for n in sorted(names))
+            for _, s in context.conditions.evolve_from_instance({}, context)
+        }
+    assert len(scenarios) == 128
+    everything = sorted(
+        itertools.product((True, False), repeat=10),
+        key=lambda m: tuple(not v for v in m),
+    )
+    assert scenarios == set(everything[:64]) | set(everything[-64:])
 
 
 @pytest.mark.parametrize("reverse", [False, True])

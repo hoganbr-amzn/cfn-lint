@@ -5,7 +5,6 @@ SPDX-License-Identifier: MIT-0
 
 from __future__ import annotations
 
-import itertools
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Iterator
 
@@ -263,22 +262,21 @@ class Conditions:
         return self._is_satisfiable(self._hard_pins | {(name, value)})
 
     def _build_conditions(self, conditions: set[str]) -> Iterator["Conditions"]:
-        scenarios_attempted = 0
-        # ``conditions`` is a set; sort it so the scenarios tried before the
-        # cap, and their order, do not depend on the hash seed.
-        names = sorted(conditions, key=str)
-        for product in itertools.product([True, False], repeat=len(names)):
-            params = dict(zip(names, product))
+        names = sorted(n for n in conditions if n in self._condition_symbols)
+        if not names:
+            yield self
+            return
+        assert self._solver is not None
+        models, _ = self._solver.models(
+            [(self._condition_symbols[n], v) for n, v in sorted(self._pins)],
+            [self._condition_symbols[n] for n in names],
+            self._max_scenarios,
+        )
+        for model in models:
             try:
-                yield self.evolve(params, assumed=True)
+                yield self.evolve(dict(zip(names, model)), assumed=True)
             except Unsatisfiable:
                 pass
-
-            scenarios_attempted += 1
-            # On occassions people will use a lot of non-related conditions
-            # this is fail safe to limit the maximum number of responses
-            if scenarios_attempted >= self._max_scenarios:
-                return
 
     def evolve_from_instance(
         self, instance: Any, context: "Context"

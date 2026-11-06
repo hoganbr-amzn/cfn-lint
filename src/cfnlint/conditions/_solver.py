@@ -6,10 +6,47 @@ SPDX-License-Identifier: MIT-0
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Iterable
+from itertools import product
+from typing import Any, Callable, Iterable, Iterator
 
 from sympy.assumptions.cnf import EncodedCNF
 from sympy.logic.inference import satisfiable
+
+
+def alternate_ends(
+    walk: Callable[[bool], Iterator[tuple[bool, ...]]], limit: int
+) -> tuple[list[tuple[bool, ...]], bool]:
+    """The truncation policy of a scenario enumeration.
+
+    ``walk(first)`` yields the satisfiable assignments in lexicographic order
+    with ``first`` tried before ``not first`` at every position, so
+    ``walk(True)`` starts at the most-True end of the order and
+    ``walk(False)`` at the most-False end.  Up to ``limit`` assignments are
+    taken alternately from the two ends, so a truncated enumeration keeps
+    the scenarios with most conditions true and those with most false (the
+    all-false scenario resolves every nested Fn::If to its last leaf), and
+    the kept set depends only on the order of the asked symbols, not on the
+    solver.  Returns the assignments sorted True-first and whether more
+    exist.  When the two walks meet (one yields an assignment the other
+    already gave, or runs out) every assignment has been seen, so the
+    enumeration is complete and nothing else is solved."""
+    ends = (walk(True), walk(False))
+    found: list[tuple[bool, ...]] = []
+    seen: set[tuple[bool, ...]] = set()
+    turn = 0
+    truncated = False
+    while True:
+        model = next(ends[turn], None)
+        turn ^= 1
+        if model is None or model in seen:
+            break
+        if len(found) >= limit:
+            truncated = True
+            break
+        found.append(model)
+        seen.add(model)
+    found.sort(key=lambda m: tuple(not v for v in m))
+    return found, truncated
 
 
 @dataclass(frozen=True)
@@ -44,6 +81,7 @@ class PinSolver:
     def __init__(self, cnf: EncodedCNF) -> None:
         self._cnf = cnf
         self._answers: dict[frozenset[tuple[int, bool]], bool] = {}
+        self._models: dict[Any, tuple[list[tuple[bool, ...]], bool]] = {}
         self._components: list[_Component] | None = None
         # variable -> (component index, variable number inside the component)
         self._position: dict[int, tuple[int, int]] = {}
@@ -104,6 +142,113 @@ class PinSolver:
             number += offset[index]
             clauses.append({number if value else -number})
         return self._is_satisfiable(clauses, size)
+
+    def models(
+        self,
+        pins: Iterable[tuple[Any, bool]],
+        free: list[Any],
+        limit: int,
+    ) -> tuple[list[tuple[bool, ...]], bool]:
+        """The distinct assignments of ``free`` (sympy Symbols) that extend to
+        a model of the CNF with ``pins`` held, in a deterministic order, and
+        whether more than ``limit`` exist (the list is then cut at ``limit``
+        by :func:`alternate_ends`).  A symbol of ``free`` that occurs in no
+        clause is unconstrained and takes both values."""
+        pinned: dict[Any, bool] = {}
+        for symbol, value in pins:
+            if pinned.setdefault(symbol, value) != value:
+                return [], False
+        encoding = self._cnf.encoding
+        key_pins = frozenset(
+            (encoding[s], v) for s, v in pinned.items() if s in encoding
+        )
+        encoded_free = [s for s in free if s in encoding and s not in pinned]
+        key = (key_pins, tuple(encoding[s] for s in encoded_free), limit)
+        cached = self._models.get(key)
+        if cached is None:
+            cached = self._models[key] = self._enumerate(
+                key_pins, [encoding[s] for s in encoded_free], limit
+            )
+        found, truncated = cached
+        # Expand back to the order of ``free``: pinned symbols keep their pin,
+        # unencoded ones take both values.
+        loose = [s for s in free if s not in encoding and s not in pinned]
+        out: list[tuple[bool, ...]] = []
+        for assignment in found:
+            values = dict(zip(encoded_free, assignment))
+            values.update({s: v for s, v in pinned.items()})
+            for extra in product((True, False), repeat=len(loose)):
+                values.update(zip(loose, extra))
+                out.append(tuple(values[s] for s in free))
+                if len(out) >= limit:
+                    return out, truncated or len(out) < len(found) * (1 << len(loose))
+        return out, truncated
+
+    def _enumerate(
+        self, pins: frozenset[tuple[int, bool]], free: list[int], limit: int
+    ) -> tuple[list[tuple[bool, ...]], bool]:
+        """Depth-first over ``free`` in order, keeping a prefix only when the
+        touched components stay satisfiable with the pins and the prefix as
+        unit clauses, so only prefixes of satisfiable assignments are solved
+        and the work is one solve per feasible prefix rather than 2^len(free)
+        attempts.  Each prefix is solved once however many times the walks
+        reach it."""
+        if self._components is None:
+            self._split()
+        assert self._components is not None
+        if frozenset() not in self._answers:
+            self._answers[frozenset()] = self._solve(frozenset())
+        if not self._answers[frozenset()]:
+            return [], False
+        variables = {v for v, _ in pins} | set(free)
+        touched = sorted({self._position[v][0] for v in variables})
+        offset: dict[int, int] = {}
+        clauses: list[set[int]] = []
+        size = 0
+        for index in touched:
+            component = self._components[index]
+            offset[index] = size
+            clauses.extend(
+                {lit + size if lit > 0 else lit - size for lit in clause}
+                for clause in component.clauses
+            )
+            size += component.size
+
+        def local(variable: int) -> int:
+            index, number = self._position[variable]
+            return number + offset[index]
+
+        for variable, value in sorted(pins):
+            clauses.append({local(variable) if value else -local(variable)})
+        numbers = [local(v) for v in free]
+        n = len(free)
+        cache: dict[tuple[bool, ...], bool] = {}
+
+        def feasible(prefix: tuple[bool, ...]) -> bool:
+            answer = cache.get(prefix)
+            if answer is None:
+                units = [
+                    {number if value else -number}
+                    for number, value in zip(numbers, prefix)
+                ]
+                answer = cache[prefix] = self._is_satisfiable(clauses + units, size)
+            return answer
+
+        if not feasible(()):
+            return [], False
+
+        def walk(first: bool) -> Iterator[tuple[bool, ...]]:
+            def descend(prefix: tuple[bool, ...]) -> Iterator[tuple[bool, ...]]:
+                if len(prefix) == n:
+                    yield prefix
+                    return
+                for value in (first, not first):
+                    if feasible(prefix + (value,)):
+                        yield from descend(prefix + (value,))
+
+            return descend(())
+
+        return alternate_ends(walk, limit)
 
     @staticmethod
     def _is_satisfiable(clauses: list[set[int]], size: int) -> bool:
