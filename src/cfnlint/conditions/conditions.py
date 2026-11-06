@@ -26,6 +26,10 @@ from cfnlint.helpers import get_partition
 LOGGER = logging.getLogger(__name__)
 
 
+def _has_literal(equal: Equal) -> bool:
+    return isinstance(equal.left, str) or isinstance(equal.right, str)
+
+
 class Conditions:
     """Conditions provides the logic for relating individual condition together"""
 
@@ -127,16 +131,25 @@ class Conditions:
                         equal_vars[c_equal.hash] = BooleanFalse()
                 else:
                     equal_vars[c_equal.hash] = Symbol(c_equal.hash)
-                    # See if parameter in this equals is the same as another equals
-                    for param in c_equal.parameters:
-                        for e_hash, e_equals in equals.items():
-                            if param in e_equals.parameters:
-                                # equivalent to NAND logic. We want to make
-                                # sure that both equals are not both True
-                                # at the same time
-                                cnf.add_prop(
-                                    ~(equal_vars[c_equal.hash] & equal_vars[e_hash])
-                                )
+                    # Only an Fn::Equals against a literal fixes the
+                    # parameter's value.  Two of them on one parameter with
+                    # different literals are exclusive; a Ref-vs-Ref
+                    # Fn::Equals (P == Q) is not exclusive with P == "x" (P
+                    # and Q can both be "x") nor with P == R.
+                    if _has_literal(c_equal):
+                        # See if parameter in this equals is the same as
+                        # another literal equals
+                        for param in c_equal.parameters:
+                            for e_hash, e_equals in equals.items():
+                                if param in e_equals.parameters and _has_literal(
+                                    e_equals
+                                ):
+                                    # equivalent to NAND logic. We want to make
+                                    # sure that both equals are not both True
+                                    # at the same time
+                                    cnf.add_prop(
+                                        ~(equal_vars[c_equal.hash] & equal_vars[e_hash])
+                                    )
                 equals[c_equal.hash] = c_equal
 
         for rule in self._rules:

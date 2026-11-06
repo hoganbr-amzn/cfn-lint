@@ -66,6 +66,40 @@ class TestConditions(TestCase):
             cfn.conditions._max_scenarios,
         )
 
+    def test_self_equals_constrains_nothing(self):
+        """Ref P against Ref P is always true and says nothing about P, so it
+        does not exclude another Fn::Equals on P, in either definition order"""
+        for names in (
+            ("DynamicFirst", "StaticSecond"),
+            ("StaticSecond", "DynamicFirst"),
+        ):
+            definitions = {
+                "DynamicFirst": {"Fn::Equals": [{"Ref": "P"}, "x"]},
+                "StaticSecond": {"Fn::Equals": [{"Ref": "P"}, {"Ref": "P"}]},
+            }
+            cfn = Template(
+                "",
+                {
+                    "Parameters": {"P": {"Type": "String"}},
+                    "Conditions": {name: definitions[name] for name in names},
+                },
+            )
+            self.assertTrue(
+                cfn.conditions.satisfiable({"DynamicFirst": True}, {"P": "x"})
+            )
+            self.assertTrue(cfn.conditions.is_always_true("StaticSecond"))
+            self.assertEqual(
+                list(
+                    cfn.conditions.build_scenarios(
+                        {"DynamicFirst": None, "StaticSecond": None}
+                    )
+                ),
+                [
+                    {"DynamicFirst": True, "StaticSecond": True},
+                    {"DynamicFirst": False, "StaticSecond": True},
+                ],
+            )
+
     def test_check_implies(self):
         """We properly validate implies scenarios"""
         template = {
@@ -440,5 +474,44 @@ class TestConditions(TestCase):
                 {"IsDeployed": True, "IsProd": True},
                 {"IsDeployed": False, "IsProd": True},
                 {"IsDeployed": False, "IsProd": False},
+            ],
+        )
+
+    def test_ref_vs_ref_equals_joins_no_exclusion_group(self):
+        """P == Q is not exclusive with P == "a" (P and Q can both be "a"),
+        so only Fn::Equals against a literal exclude each other."""
+        template = {
+            "Parameters": {"P": {"Type": "String"}, "Q": {"Type": "String"}},
+            "Conditions": {
+                "IsA": {"Fn::Equals": [{"Ref": "P"}, "a"]},
+                "IsB": {"Fn::Equals": [{"Ref": "P"}, "b"]},
+                "Same": {"Fn::Equals": [{"Ref": "P"}, {"Ref": "Q"}]},
+            },
+        }
+        cfn = Template("", template, ["us-east-1"])
+        self.assertEqual(
+            sorted(
+                cfn.conditions.build_scenarios({"IsA": None, "Same": None}),
+                key=lambda s: (s["IsA"], s["Same"]),
+                reverse=True,
+            ),
+            [
+                {"IsA": True, "Same": True},
+                {"IsA": True, "Same": False},
+                {"IsA": False, "Same": True},
+                {"IsA": False, "Same": False},
+            ],
+        )
+        self.assertFalse(cfn.conditions.check_implies({"IsA": True}, "Same"))
+        self.assertEqual(
+            sorted(
+                cfn.conditions.build_scenarios({"IsA": None, "IsB": None}),
+                key=lambda s: (s["IsA"], s["IsB"]),
+                reverse=True,
+            ),
+            [
+                {"IsA": True, "IsB": False},
+                {"IsA": False, "IsB": True},
+                {"IsA": False, "IsB": False},
             ],
         )

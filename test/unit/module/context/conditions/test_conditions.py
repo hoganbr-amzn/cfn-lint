@@ -667,3 +667,33 @@ def test_solver_calls_do_not_grow_with_reused_conditions():
 
     assert calls[0] > 0
     assert calls[0] == calls[1]
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_self_equals_does_not_exclude_other_equals(reverse):
+    """Two buckets with one name, under P == "x" and under P == P: both exist
+    when P is "x", so E3019 reports the clash whatever the definition order."""
+    definitions = [
+        ("DynamicFirst", {"Fn::Equals": [{"Ref": "P"}, "x"]}),
+        ("StaticSecond", {"Fn::Equals": [{"Ref": "P"}, {"Ref": "P"}]}),
+    ]
+    if reverse:
+        definitions.reverse()
+    template = {
+        "AWSTemplateFormatVersion": "2010-09-09",
+        "Parameters": {"P": {"Type": "String"}},
+        "Conditions": dict(definitions),
+        "Resources": {
+            name: {
+                "Type": "AWS::S3::Bucket",
+                "Condition": condition,
+                "Properties": {"BucketName": "same-name"},
+            }
+            for name, condition in (
+                ("First", "DynamicFirst"),
+                ("Second", "StaticSecond"),
+            )
+        },
+    }
+    matches = lint(json.dumps(template), config=ManualArgs(regions=["us-east-1"]))
+    assert sorted(m.rule.id for m in matches) == ["E3019", "E3019", "W8003"]
