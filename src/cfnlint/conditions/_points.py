@@ -17,9 +17,12 @@ between references and literals, including Ref-vs-Ref and Ref-vs-itself.
 Engine selection: CFNLINT_COND_ENGINE =
   hybrid  (default) a component whose static point count (after folding
           static intrinsics) is at most CFNLINT_PP_MAX_POINTS (1,048,576) is
-          answered by points, the rest by incremental SAT; a points question
-          over the step budget (CFNLINT_PP_BUDGET) is answered by SAT for
-          that component, so every answer is exact for the model.
+          answered by points, the rest by incremental SAT; a points search
+          over the work budget (CFNLINT_PP_BUDGET) routes its component to
+          SAT for the rest of the lint, and after CFNLINT_PP_MAX_TRIPS such
+          searches every component goes to SAT, so every answer is exact for
+          the model that gave it and the budget bounds the lint, not one
+          question.
   pp      every component by points except condition-reference cycles,
           with the same budget and SAT fallback.
   pyinc   every question by incremental SAT (PinSolver with persistent
@@ -59,6 +62,8 @@ if ENGINE not in ("hybrid", "pp", "pyinc", "g", "dual"):
 ENUM_MAX = int(os.environ.get("CFNLINT_PP_ENUM_MAX", "4096"))
 MAX_POINTS = int(os.environ.get("CFNLINT_PP_MAX_POINTS", "1048576"))
 STEP_BUDGET = int(os.environ.get("CFNLINT_PP_BUDGET", "200000"))
+# after this many searches ran out of budget, the rest of the lint is SAT
+MAX_TRIPS = int(os.environ.get("CFNLINT_PP_MAX_TRIPS", "10"))
 MAX_REFS = 400  # recursion depth guard
 
 _STATS: dict[str, Any] = {
@@ -231,6 +236,7 @@ class PointSolver:
         self._answers: dict[frozenset, bool] = {}
         self._built = False
         self._global: bool | None = None
+        self._trips = 0  # point searches that ran out of budget
         self._dual = PinSolver(cnf) if ENGINE == "dual" else None
 
     # ----- construction
@@ -493,6 +499,10 @@ class PointSolver:
         ans = c.answers.get(key)
         if ans is not None:
             return ans
+        if c.route == "pp" and self._trips >= MAX_TRIPS:
+            # the lint has spent its share of point searches that led
+            # nowhere; every component still on points is answered by SAT
+            c.route, c.why = "sat", "trips"
         if c.route == "sat":
             _STATS["sat_queries"] += 1
             ans = self._sat(c.cnf_indices, pins)
@@ -501,7 +511,13 @@ class PointSolver:
             try:
                 ans = self._points(c, pins)
             except _Budget:
+                # The budget bounds one search.  A component whose questions
+                # need more than that is answered by SAT from now on, so a
+                # template that asks many distinct hard questions about one
+                # component pays the budget once, not once per question.
                 _STATS["fallbacks"] += 1
+                self._trips += 1
+                c.route, c.why = "sat", "budget"
                 ans = self._sat(c.cnf_indices, pins)
         c.answers[key] = ans
         return ans

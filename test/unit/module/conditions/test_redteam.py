@@ -9,6 +9,7 @@ a fixture file, is what is pinned down.
 
 from unittest import TestCase
 
+from cfnlint.conditions import _points as points
 from cfnlint.conditions._solver import PinSolver
 from cfnlint.template import Template
 
@@ -80,6 +81,106 @@ def refref_a8_budget(n):
             }
         },
     }
+
+
+def budget_fallback(n, prefix=""):
+    """n free parameters, E_i = P_i == a, Never (false everywhere), H_j =
+    Never or E_j; topic j on H_j with Fn::If on E_j, so (H_j true, E_j
+    false) is an unsatisfiable question that a point search can only settle
+    by visiting every point.  ``prefix`` makes an independent copy."""
+    p = prefix
+    conds = {f"{p}E{i}": _eq(_ref(f"{p}P{i}"), "a") for i in range(n)}
+    conds[f"{p}Never"] = {
+        "Fn::Or": [
+            {"Fn::And": [_cond(f"{p}E{i}"), {"Fn::Not": [_cond(f"{p}E{i}")]}]}
+            for i in range(n)
+        ]
+    }
+    res = {}
+    for j in range(n):
+        conds[f"{p}H{j}"] = {"Fn::Or": [_cond(f"{p}Never"), _cond(f"{p}E{j}")]}
+        res[f"{p}T{j}"] = {
+            "Type": "AWS::SNS::Topic",
+            "Condition": f"{p}H{j}",
+            "Properties": {
+                "TopicName": {"Fn::If": [f"{p}E{j}", f"{p}t{j}-a", f"{p}t{j}-b"]}
+            },
+        }
+    return {
+        "Parameters": {f"{p}P{i}": {"Type": "String"} for i in range(n)},
+        "Conditions": conds,
+        "Resources": res,
+    }
+
+
+def _merge(*templates):
+    out = {"Parameters": {}, "Conditions": {}, "Resources": {}}
+    for t in templates:
+        for section in out:
+            out[section].update(t.get(section, {}))
+    return out
+
+
+class TestPointBudget(TestCase):
+    """W1 P1: the work budget bounds one point search; a component whose
+    search runs out is answered by SAT for the rest of the lint, and after
+    MAX_TRIPS such searches every component is."""
+
+    def setUp(self):
+        if points.ENGINE not in ("hybrid", "pp"):
+            self.skipTest("point engine not selected")
+        self._budget = points.STEP_BUDGET
+        self._trips = points.MAX_TRIPS
+
+    def tearDown(self):
+        points.STEP_BUDGET = self._budget
+        points.MAX_TRIPS = self._trips
+
+    @staticmethod
+    def _ask(cfn, pins):
+        return cfn.conditions._solver.satisfiable(
+            [(cfn.conditions._solver_params[n], v) for n, v in pins]
+        )
+
+    def test_component_that_trips_the_budget_is_routed_to_sat(self):
+        points.STEP_BUDGET = 500
+        cfn = Template("", budget_fallback(8), ["us-east-1"])
+        solver = cfn.conditions._solver
+        fallbacks = points._STATS["fallbacks"]
+        self.assertFalse(self._ask(cfn, [("H0", True), ("E0", False)]))
+        self.assertEqual(points._STATS["fallbacks"], fallbacks + 1)
+        (component,) = solver._components
+        self.assertEqual((component.route, component.why), ("sat", "budget"))
+        # later distinct hard questions about the component do not search
+        for j in range(1, 8):
+            self.assertFalse(self._ask(cfn, [(f"H{j}", True), (f"E{j}", False)]))
+            self.assertTrue(self._ask(cfn, [(f"H{j}", True), (f"E{j}", True)]))
+        self.assertEqual(points._STATS["fallbacks"], fallbacks + 1)
+
+    def test_budget_is_enough_for_an_easy_component(self):
+        cfn = Template("", budget_fallback(8), ["us-east-1"])
+        fallbacks = points._STATS["fallbacks"]
+        for j in range(8):
+            self.assertFalse(self._ask(cfn, [(f"H{j}", True), (f"E{j}", False)]))
+        self.assertEqual(points._STATS["fallbacks"], fallbacks)
+        (component,) = cfn.conditions._solver._components
+        self.assertEqual(component.route, "pp")
+
+    def test_after_max_trips_every_component_goes_to_sat(self):
+        points.STEP_BUDGET = 500
+        points.MAX_TRIPS = 1
+        cfn = Template(
+            "",
+            _merge(budget_fallback(8, "X"), budget_fallback(8, "Y")),
+            ["us-east-1"],
+        )
+        solver = cfn.conditions._solver
+        fallbacks = points._STATS["fallbacks"]
+        self.assertFalse(self._ask(cfn, [("XH0", True), ("XE0", False)]))
+        self.assertFalse(self._ask(cfn, [("YH0", True), ("YE0", False)]))
+        self.assertEqual(points._STATS["fallbacks"], fallbacks + 1)
+        routes = sorted((c.route, c.why) for c in solver._components)
+        self.assertEqual(routes, [("sat", "budget"), ("sat", "trips")])
 
 
 class TestRefVsRefExclusion(TestCase):
