@@ -5,7 +5,6 @@ SPDX-License-Identifier: MIT-0
 
 from __future__ import annotations
 
-import itertools
 import logging
 import traceback
 from functools import lru_cache
@@ -278,42 +277,53 @@ class Conditions:
         # before the cap, and their order, do not depend on the hash seed.
         condition_names.sort(key=str)
 
+        pins = list(fixed_pins)
+        if region:
+            # A region fixes every Fn::Equals on AWS::Region and AWS::Partition
+            partition = get_partition(region)
+            for condition in self._conditions.values():
+                for eql in condition.equals:
+                    is_region, equal_region = eql.is_region
+                    if is_region:
+                        pins.append(
+                            (self._solver_params[eql.hash], equal_region == region)
+                        )
+                    is_partition, equal_partition = eql.is_partition
+                    if is_partition:
+                        pins.append(
+                            (
+                                self._solver_params[eql.hash],
+                                equal_partition == partition,
+                            )
+                        )
         try:
-            # build a large matric of True/False options
-            # based on the provided conditions
-            scenarios_attempted = 0
-            if region:
-                # each condition takes the values it can have in the region
-                products = itertools.product(
-                    *[
-                        self.build_scenerios_on_region(name, region)
-                        for name in condition_names
-                    ]
-                )
-            else:
-                products = itertools.product([True, False], repeat=len(condition_names))  # type: ignore
-
-            for p in products:
-                pins = list(fixed_pins)
-                params = dict(zip(condition_names, p))
-                for condition_name, opt in params.items():
-                    # KeyError for a condition name the template does not define
-                    self._conditions[condition_name]
-                    pins.append((self._solver_params[condition_name], bool(opt)))
-
-                # if the scenario can be satisfied then return it
-                if self._satisfiable(pins):
-                    yield {**params, **conditions_set}
-
-                scenarios_attempted += 1
-                # On occassions people will use a lot of non-related conditions
-                # this is fail safe to limit the maximum number of responses
-                if scenarios_attempted >= self._max_scenarios:
-                    return
+            symbols = []
+            for condition_name in condition_names:
+                # KeyError for a condition name the template does not define
+                self._conditions[condition_name]
+                symbols.append(self._solver_params[condition_name])
         except KeyError:
-            # KeyError is because the listed condition doesn't exist because of bad
-            #  formatting or just the wrong condition name
             return
+        solver_pins = []
+        for literal, value in pins:
+            if isinstance(literal, (BooleanTrue, BooleanFalse)):
+                if bool(literal) != value:
+                    return
+                continue
+            solver_pins.append((literal, value))
+        # Enumerate the satisfiable scenarios only, in a deterministic order,
+        # at most _max_scenarios of them; truncation is counted on the solver.
+        models, truncated = self._solver.models(
+            solver_pins, symbols, self._max_scenarios
+        )
+        if truncated:
+            LOGGER.debug(
+                "Condition scenarios truncated at %s for %s",
+                self._max_scenarios,
+                condition_names,
+            )
+        for model in models:
+            yield {**dict(zip(condition_names, model)), **conditions_set}
 
     def check_implies(self, scenarios: dict[str, bool], implies: str) -> bool:
         """Based on a bunch of scenario conditions and their Truth/False value

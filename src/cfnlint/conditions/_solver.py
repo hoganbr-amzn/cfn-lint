@@ -6,10 +6,15 @@ SPDX-License-Identifier: MIT-0
 from __future__ import annotations
 
 from dataclasses import dataclass
+from itertools import product
 from typing import Any, Iterable
 
 from sympy.assumptions.cnf import EncodedCNF
 from sympy.logic.inference import satisfiable
+
+
+def _product(n: int):
+    return product((True, False), repeat=n)
 
 
 @dataclass(frozen=True)
@@ -44,6 +49,9 @@ class PinSolver:
     def __init__(self, cnf: EncodedCNF) -> None:
         self._cnf = cnf
         self._answers: dict[frozenset[tuple[int, bool]], bool] = {}
+        self._models: dict[Any, tuple[list[tuple[bool, ...]], bool]] = {}
+        # how many enumerations hit their limit (observable truncation)
+        self.truncations = 0
         self._components: list[_Component] | None = None
         # variable -> (component index, variable number inside the component)
         self._position: dict[int, tuple[int, int]] = {}
@@ -101,6 +109,105 @@ class PinSolver:
             number += offset[index]
             clauses.append({number if value else -number})
         return self._is_satisfiable(clauses, size)
+
+    def models(
+        self,
+        pins: Iterable[tuple[Any, bool]],
+        free: list[Any],
+        limit: int,
+    ) -> tuple[list[tuple[bool, ...]], bool]:
+        """The distinct assignments of ``free`` (sympy Symbols) that extend to
+        a model of the CNF with ``pins`` held, in a deterministic order, and
+        whether more than ``limit`` exist (the list is then cut at ``limit``).
+
+        Each assignment is found by one solve; its negation over ``free`` is
+        then added as a blocking clause, so only satisfiable assignments cost
+        a solve and the work is (number of real scenarios + 1) solves rather
+        than 2^len(free) attempts.  A symbol of ``free`` that occurs in no
+        clause is unconstrained and takes both values."""
+        pinned: dict[Any, bool] = {}
+        for symbol, value in pins:
+            if pinned.setdefault(symbol, value) != value:
+                return [], False
+        encoding = self._cnf.encoding
+        key_pins = frozenset(
+            (encoding[s], v) for s, v in pinned.items() if s in encoding
+        )
+        encoded_free = [s for s in free if s in encoding and s not in pinned]
+        key = (key_pins, tuple(encoding[s] for s in encoded_free), limit)
+        cached = self._models.get(key)
+        if cached is None:
+            cached = self._models[key] = self._enumerate(
+                key_pins, [encoding[s] for s in encoded_free], limit
+            )
+            if cached[1]:
+                self.truncations += 1
+        found, truncated = cached
+        # Expand back to the order of ``free``: pinned symbols keep their pin,
+        # unencoded ones take both values.
+        loose = [s for s in free if s not in encoding and s not in pinned]
+        out: list[tuple[bool, ...]] = []
+        for assignment in found:
+            values = dict(zip(encoded_free, assignment))
+            values.update({s: v for s, v in pinned.items()})
+            for extra in _product(len(loose)):
+                values.update(zip(loose, extra))
+                out.append(tuple(values[s] for s in free))
+                if len(out) >= limit:
+                    return out, truncated or len(out) < len(found) * (1 << len(loose))
+        return out, truncated
+
+    def _enumerate(
+        self, pins: frozenset[tuple[int, bool]], free: list[int], limit: int
+    ) -> tuple[list[tuple[bool, ...]], bool]:
+        if self._components is None:
+            self._split()
+        assert self._components is not None
+        if frozenset() not in self._answers:
+            self._answers[frozenset()] = self._solve(frozenset())
+        if not self._answers[frozenset()]:
+            return [], False
+        variables = {v for v, _ in pins} | set(free)
+        touched = sorted({self._position[v][0] for v in variables})
+        offset: dict[int, int] = {}
+        clauses: list[set[int]] = []
+        size = 0
+        for index in touched:
+            component = self._components[index]
+            offset[index] = size
+            clauses.extend(
+                {lit + size if lit > 0 else lit - size for lit in clause}
+                for clause in component.clauses
+            )
+            size += component.size
+
+        def local(variable: int) -> int:
+            index, number = self._position[variable]
+            return number + offset[index]
+
+        for variable, value in sorted(pins):
+            clauses.append({local(variable) if value else -local(variable)})
+        numbers = [local(v) for v in free]
+        found: list[tuple[bool, ...]] = []
+
+        def ordered(truncated: bool):
+            # True-first lexicographic order, as itertools.product gave
+            return sorted(found, key=lambda m: tuple(not v for v in m)), truncated
+
+        while True:
+            model = satisfiable(EncodedCNF(clauses, {n: n for n in range(1, size + 1)}))
+            if not model:
+                return ordered(False)
+            if len(found) >= limit:
+                return ordered(True)
+            assignment = tuple(bool(model[n]) for n in numbers)
+            found.append(assignment)
+            if not numbers:
+                return ordered(False)
+            # block this assignment of the free variables
+            clauses.append(
+                {-n if value else n for n, value in zip(numbers, assignment)}
+            )
 
     @staticmethod
     def _is_satisfiable(clauses: list[set[int]], size: int) -> bool:
