@@ -6,6 +6,7 @@ SPDX-License-Identifier: MIT-0
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from functools import cached_property
 from typing import Any
 
 from sympy import And, Not, Or, Symbol
@@ -14,6 +15,20 @@ from sympy.logic.boolalg import BooleanFunction
 from cfnlint.conditions._utils import get_hash
 from cfnlint.context.conditions._equals import Equal
 from cfnlint.helpers import FUNCTION_CONDITIONS, is_function
+
+
+class ConditionMemo:
+    """One Condition per name, shared by every ``Condition: name``
+    reference in a template, so a condition referenced many times is
+    expanded once rather than once per reference (the tree was otherwise
+    exponential in the depth of the reference chain).  A definition that
+    needed the ``Fn::Equals: [None, None]`` fallback anywhere below it is
+    not memoised: the fallback stands for a name missing from
+    ``all_conditions``, which depends on the path that led there."""
+
+    def __init__(self) -> None:
+        self.named: dict[str, "Condition"] = {}
+        self.fallbacks: int = 0
 
 
 @dataclass(frozen=True)
@@ -28,7 +43,10 @@ class Condition:
 
     @classmethod
     def create_from_instance(
-        cls, instance: Any, all_conditions: dict[str, Any]
+        cls,
+        instance: Any,
+        all_conditions: dict[str, Any],
+        memo: ConditionMemo | None = None,
     ) -> "Condition":
         instance_hash = get_hash(instance)
 
@@ -49,7 +67,9 @@ class Condition:
 
             condition = []
             for v in fn_v:
-                condition.append(Condition.create_from_instance(v, all_conditions))
+                condition.append(
+                    Condition.create_from_instance(v, all_conditions, memo)
+                )
 
             cnf = None
             if fn_k == "Fn::And":
@@ -71,15 +91,25 @@ class Condition:
             if not isinstance(fn_v, str):
                 raise ValueError(f"Condition value {fn_v!r} must be a string")
             # Build the sub-condition for is_region/equals traversal
-            sub_condition = all_conditions.get(fn_v)
-            try:
-                sub_all_conditions = all_conditions.copy()
-                del sub_all_conditions[fn_v]
-                c = Condition.create_from_instance(sub_condition, sub_all_conditions)
-            except Exception:
-                c = Condition.create_from_instance(
-                    {"Fn::Equals": [None, None]}, all_conditions
-                )
+            if memo is not None and fn_v in memo.named:
+                c = memo.named[fn_v]
+            else:
+                sub_condition = all_conditions.get(fn_v)
+                fallbacks = memo.fallbacks if memo is not None else 0
+                try:
+                    sub_all_conditions = all_conditions.copy()
+                    del sub_all_conditions[fn_v]
+                    c = Condition.create_from_instance(
+                        sub_condition, sub_all_conditions, memo
+                    )
+                    if memo is not None and memo.fallbacks == fallbacks:
+                        memo.named[fn_v] = c
+                except Exception:
+                    if memo is not None:
+                        memo.fallbacks += 1
+                    c = Condition.create_from_instance(
+                        {"Fn::Equals": [None, None]}, all_conditions
+                    )
             # Use a Symbol for the condition name instead of the expanded CNF
             # The equivalence constraint is added in Conditions.create_from_instance
             return cls(
@@ -105,7 +135,7 @@ class Condition:
             hash=self.hash,  # Pass the hash along
         )
 
-    @property
+    @cached_property
     def is_region(self) -> bool:
         """Returns True or False if the condition is based on region
 
@@ -126,7 +156,7 @@ class Condition:
             return self.condition.is_region
         return False
 
-    @property
+    @cached_property
     def equals(self) -> list[Equal]:
         """Returns a Sequence of the Equals that make up the Condition
 
@@ -134,15 +164,17 @@ class Condition:
 
         Returns:
             Sequence[EqualParameter] | Sequence[Equal] | None:
-                The Equal that are part of the condition
+                The Equal that are part of the condition, one per distinct
+                Fn::Equals
         """
         if self.fn_equals:
             return [self.fn_equals]
         if isinstance(self.condition, list):
-            equals = []
+            equals: dict[str, Equal] = {}
             for c in self.condition:
-                equals.extend(c.equals)
-            return equals
+                for equal in c.equals:
+                    equals.setdefault(equal.hash, equal)
+            return list(equals.values())
         if self.condition:
             return self.condition.equals
         return []

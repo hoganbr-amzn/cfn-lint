@@ -17,6 +17,7 @@ from cfnlint.conditions._condition import (
     ConditionNamed,
     ConditionNot,
     ConditionOr,
+    _Memo,
 )
 from cfnlint.conditions._equals import Equal
 from cfnlint.helpers import FUNCTION_CONDITIONS
@@ -28,7 +29,9 @@ _RULE = Dict[str, Any]
 
 
 class _Assertion:
-    def __init__(self, condition: Any, all_conditions: dict[str, dict]) -> None:
+    def __init__(
+        self, condition: Any, all_conditions: dict[str, dict], memo: _Memo | None = None
+    ) -> None:
         self._fn_equals: Equal | None = None
         self._condition: ConditionList | ConditionNamed | None = None
 
@@ -40,15 +43,15 @@ class _Assertion:
                     if k == "Fn::Equals":
                         self._fn_equals = Equal(v)
                     elif k == "Fn::And":
-                        self._condition = ConditionAnd(v, all_conditions)
+                        self._condition = ConditionAnd(v, all_conditions, memo)
                     elif k == "Fn::Or":
-                        self._condition = ConditionOr(v, all_conditions)
+                        self._condition = ConditionOr(v, all_conditions, memo)
                     elif k == "Fn::Not":
-                        self._condition = ConditionNot(v, all_conditions)
+                        self._condition = ConditionNot(v, all_conditions, memo)
                 elif k == "Condition":
                     if not isinstance(v, str):
                         raise ValueError(f"Condition value {v!r} must be a string")
-                    self._condition = ConditionNamed(v, all_conditions)
+                    self._condition = ConditionNamed.named(v, all_conditions, memo)
                 else:
                     raise ValueError(f"Unknown key ({k}) in condition")
         else:
@@ -79,11 +82,16 @@ class _Assertion:
 
 
 class _Assertions:
-    def __init__(self, assertions: list[dict], all_conditions: dict[str, dict]) -> None:
+    def __init__(
+        self,
+        assertions: list[dict],
+        all_conditions: dict[str, dict],
+        memo: _Memo | None = None,
+    ) -> None:
         self._assertions: list[_Assertion] = []
         for assertion in assertions:
             assert_ = assertion.get("Assert", {})
-            self._assertions.append(_Assertion(assert_, all_conditions))
+            self._assertions.append(_Assertion(assert_, all_conditions, memo))
 
     def build_cnf(self, params: dict[str, Symbol]) -> BooleanFunction | Symbol | None:
         assertions = []
@@ -105,24 +113,27 @@ class _Assertions:
 
 
 class Rule:
-    def __init__(self, rule: _RULE, all_conditions: dict[str, dict]) -> None:
+    def __init__(
+        self, rule: _RULE, all_conditions: dict[str, dict], memo: _Memo | None = None
+    ) -> None:
         self._condition: _Assertion | None = None
         self._assertions: _Assertions | None = None
-        self._init_rule(rule, all_conditions)
+        self._init_rule(rule, all_conditions, memo)
 
     def _init_rule(
         self,
         rule: _RULE,
         all_conditions: dict[str, dict],
+        memo: _Memo | None = None,
     ) -> None:
         condition = rule.get("RuleCondition")
         if condition:
-            self._condition = _Assertion(condition, all_conditions)
+            self._condition = _Assertion(condition, all_conditions, memo)
 
         assertions = rule.get("Assertions")
         if not assertions:
             raise ValueError("Rule must have Assertions")
-        self._assertions = _Assertions(assertions, all_conditions)
+        self._assertions = _Assertions(assertions, all_conditions, memo)
 
     @property
     def equals(self) -> list[Equal]:

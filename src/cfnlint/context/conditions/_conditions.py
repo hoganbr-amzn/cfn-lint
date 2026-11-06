@@ -14,7 +14,7 @@ from sympy.assumptions.cnf import EncodedCNF
 from sympy.logic.inference import satisfiable
 
 from cfnlint.conditions._utils import add_equivalence, get_hash
-from cfnlint.context.conditions._condition import Condition
+from cfnlint.context.conditions._condition import Condition, ConditionMemo
 from cfnlint.context.conditions._equals import Equal
 from cfnlint.context.conditions._utils import (
     build_instance_from_scenario,
@@ -85,6 +85,7 @@ class Conditions:
         obj: dict[str, Condition] = {}
         if not isinstance(conditions, dict):
             raise ValueError("Conditions must be a object")
+        memo = ConditionMemo()
         for k, v in conditions.items():
             if not isinstance(k, str):
                 # Condition logical IDs must be strings (rule E8001 reports
@@ -92,10 +93,16 @@ class Conditions:
                 # table below never receives a non-string name, which would
                 # raise TypeError before any rule gets to run.
                 continue
+            if k in memo.named:
+                obj[k] = memo.named[k]
+                continue
             try:
                 other_conditions = conditions.copy()
                 del other_conditions[k]
-                obj[k] = Condition.create_from_instance(v, other_conditions)
+                fallbacks = memo.fallbacks
+                obj[k] = Condition.create_from_instance(v, other_conditions, memo)
+                if memo.fallbacks == fallbacks:
+                    memo.named[k] = obj[k]
             except ValueError:
                 obj[k] = Condition.create_from_instance(
                     {"Fn::Equals": [None, None]}, conditions
