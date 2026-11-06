@@ -12,6 +12,7 @@ from sympy.logic.inference import satisfiable
 
 from cfnlint.api import ManualArgs, lint
 from cfnlint.context import create_context_for_template
+from cfnlint.context.conditions._condition import Condition
 from cfnlint.context.conditions._conditions import Conditions
 from cfnlint.context.conditions.exceptions import Unsatisfiable
 from cfnlint.template import Template
@@ -807,3 +808,36 @@ def test_rules_restrict_conditions():
     assert list(cfn.conditions.build_scenarios({"IsWest": None})) == [
         {"IsWest": False}
     ]
+
+
+def test_evolve_returns_one_conditions_per_set_of_pins():
+    """Evolving to the same pins, from anywhere, gives the same object, and
+    each condition is evolved to a status once per template."""
+    cfn = Template("", template())
+    conditions = create_context_for_template(cfn).conditions
+    first = conditions.evolve({"IsUsEast1": True}).evolve({"IsProd": False})
+    second = conditions.evolve({"IsProd": False}).evolve({"IsUsEast1": True})
+    assert first is second
+    assert first.status == {"IsUsEast1": True, "IsProd": False}
+    # an assumed pin is not a fact, so it is a different Conditions
+    assumed = conditions.evolve({"IsUsEast1": True}, assumed=True)
+    assert assumed is not conditions.evolve({"IsUsEast1": True})
+    assert assumed.is_reachable("IsUsEast1", False)
+
+
+def test_condition_evolve_calls_do_not_grow_with_resources():
+    """Resources that reuse the same conditions evolve each condition to each
+    status once per lint, however many such resources there are."""
+    calls = []
+    for alarms in (5, 20):
+        with patch.object(
+            Condition, "evolve", autospec=True, side_effect=Condition.evolve
+        ) as evolve:
+            lint(
+                json.dumps(_alarms_reusing_conditions(alarms)),
+                config=ManualArgs(regions=["us-east-1"]),
+            )
+        calls.append(evolve.call_count)
+
+    assert calls[0] > 0
+    assert calls[0] == calls[1]
