@@ -1016,42 +1016,6 @@ def test_allowed_values_compare_as_cloudformation_strings():
     conditions.evolve({"T": True, "F": False})
 
 
-def _condition_chain(n, top_down):
-    """C0 is an Fn::Equals and each Ci negates C(i-1); written from the top
-    of the chain down when ``top_down``, so that the first condition read
-    references every other one."""
-    conditions = {"C0": {"Fn::Equals": [{"Ref": "P"}, "a"]}}
-    for i in range(1, n):
-        conditions[f"C{i}"] = {"Fn::Not": [{"Condition": f"C{i - 1}"}]}
-    if top_down:
-        conditions = dict(reversed(conditions.items()))
-    return {
-        "Parameters": {"P": {"Type": "String"}},
-        "Conditions": conditions,
-        "Resources": {},
-    }
-
-
-@pytest.mark.parametrize("top_down", [False, True])
-def test_long_condition_chain_in_either_order(top_down):
-    """A Condition: chain of 400 links is built and answered whether the
-    template lists it bottom-up or top-down (the walks over equals and
-    is_region are settled link by link, so no walk recurses along the chain)."""
-    n = 400
-    cfn = Template("", _condition_chain(n, top_down))
-    conditions = create_context_for_template(cfn).conditions
-    assert len(conditions.conditions) == n
-    last = f"C{n - 1}"
-    assert conditions.conditions[last].equals[0].hash == (
-        conditions.conditions["C0"].equals[0].hash
-    )
-    assert not conditions.conditions[last].is_region
-    # C(n-1) is C0 negated n-1 times, so pinning it fixes C0
-    pinned = conditions.evolve({last: True})
-    assert pinned.is_reachable("C0", n % 2 == 1)
-    assert not pinned.is_reachable("C0", n % 2 == 0)
-
-
 def _queues_with_shared_conditions(n, private=2, shared=6):
     """n SQS queues, each with 8 properties set by Fn::If on 8 conditions: 2
     private to the queue and 6 shared, so the lint asks up to 128 scenarios
@@ -1129,6 +1093,36 @@ def test_evolved_conditions_hold_only_their_pins():
     }
 
 
+class _NoIteration(dict):
+    """A condition dict that refuses to be iterated."""
+
+    def __iter__(self):
+        raise AssertionError("iterated over every condition")
+
+    def items(self):
+        raise AssertionError("iterated over every condition")
+
+    def values(self):
+        raise AssertionError("iterated over every condition")
+
+
+def test_evolve_and_status_read_only_the_pins():
+    """Once the template's own facts are known, evolving a Conditions and
+    reading its status touch the pins laid over the template, never every
+    condition of the template."""
+    cfn = Template("", _queues_with_shared_conditions(50))
+    root = create_context_for_template(cfn).conditions
+    first = root.evolve({"S0": True})
+    first.conditions.base = _NoIteration(root.conditions)
+    second = first.evolve({"C3x1": False, "S1": True}, assumed=True)
+    assert first.status == {"S0": True}
+    assert list(second.status) == ["S0", "S1", "C3x1"]
+    assert second.evolve({"S1": True}) is second
+    assert second.is_reachable("S2", True)
+    with pytest.raises(Unsatisfiable):
+        second.evolve({"S0": False})
+
+
 def test_evolved_memo_is_bounded():
     """The memo of evolved Conditions is emptied past _EVOLVED_MAX entries
     and evolving keeps working."""
@@ -1159,3 +1153,39 @@ def test_lint_memory_does_not_grow_with_scenarios():
     assert len(root._evolved) > 1000
     assert max(len(c.conditions.pinned) for c in root._evolved.values()) <= 8
     assert all(c.conditions.base is root.conditions for c in root._evolved.values())
+
+
+def _condition_chain(n, top_down):
+    """C0 is an Fn::Equals and each Ci negates C(i-1); written from the top
+    of the chain down when ``top_down``, so that the first condition read
+    references every other one."""
+    conditions = {"C0": {"Fn::Equals": [{"Ref": "P"}, "a"]}}
+    for i in range(1, n):
+        conditions[f"C{i}"] = {"Fn::Not": [{"Condition": f"C{i - 1}"}]}
+    if top_down:
+        conditions = dict(reversed(conditions.items()))
+    return {
+        "Parameters": {"P": {"Type": "String"}},
+        "Conditions": conditions,
+        "Resources": {},
+    }
+
+
+@pytest.mark.parametrize("top_down", [False, True])
+def test_long_condition_chain_in_either_order(top_down):
+    """A Condition: chain of 400 links is built and answered whether the
+    template lists it bottom-up or top-down (the walks over equals and
+    is_region are settled link by link, so no walk recurses along the chain)."""
+    n = 400
+    cfn = Template("", _condition_chain(n, top_down))
+    conditions = create_context_for_template(cfn).conditions
+    assert len(conditions.conditions) == n
+    last = f"C{n - 1}"
+    assert conditions.conditions[last].equals[0].hash == (
+        conditions.conditions["C0"].equals[0].hash
+    )
+    assert not conditions.conditions[last].is_region
+    # C(n-1) is C0 negated n-1 times, so pinning it fixes C0
+    pinned = conditions.evolve({last: True})
+    assert pinned.is_reachable("C0", n % 2 == 1)
+    assert not pinned.is_reachable("C0", n % 2 == 0)

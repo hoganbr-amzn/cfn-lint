@@ -114,6 +114,14 @@ class Conditions:
     _order: dict[str, int] | None = field(
         init=True, default=None, compare=False, repr=False
     )
+    # Computed once per Conditions: every condition with a status, and the
+    # scenarios enumerated for each set of condition names.
+    _status_cache: dict[str, bool] | None = field(
+        init=False, default=None, compare=False, repr=False
+    )
+    _scenario_cache: dict[tuple[str, ...], list["Conditions"]] = field(
+        init=False, default_factory=dict, compare=False, repr=False
+    )
 
     def __post_init__(self) -> None:
         if self._solver is None:
@@ -285,10 +293,9 @@ class Conditions:
         conditions = self.conditions
         if isinstance(conditions, _Pinned):
             return conditions.base, conditions.pinned
-        if not isinstance(conditions, dict):
-            conditions = dict(conditions)
-            object.__setattr__(self, "conditions", conditions)
-        return conditions, {}
+        if isinstance(conditions, dict):
+            return conditions, {}
+        return dict(conditions), {}
 
     def _template_facts(self) -> tuple[dict[str, bool], dict[str, int]]:
         if self._base_status is None:
@@ -341,11 +348,14 @@ class Conditions:
                     new_status=status,
                     current_status=self.status,
                 )
-            with_status = self._with_status.get((condition, s))
-            if with_status is None:
-                with_status = base[condition].evolve(status=s)
-                self._with_status[(condition, s)] = with_status
-            new_pinned[condition] = with_status
+            if s is None:
+                continue
+            if current.status is None:
+                with_status = self._with_status.get((condition, s))
+                if with_status is None:
+                    with_status = base[condition].evolve(status=s)
+                    self._with_status[(condition, s)] = with_status
+                new_pinned[condition] = with_status
             # Only the conditions being pinned by *this* call, and only
             # when they are facts (not enumeration hypotheses), join the
             # hard pins.  Conditions carried over from a prior evolve are
@@ -368,33 +378,61 @@ class Conditions:
             if n in symbols and n not in new_pinned
         }
         new_pins = frozenset(pins)
+
+        # The result depends only on the template and the pins: every
+        # condition with a status is pinned, so return the one built before
+        # (it was satisfiable when it was built) without asking the solver.
+        key = (new_pins, frozenset(hard_pins))
+        evolved = self._evolved.get(key)
+        if evolved is not None:
+            return evolved
         if not self._is_satisfiable(new_pins):
             raise Unsatisfiable(
                 new_status=status,
                 current_status=self.status,
             )
-
-        # The result depends only on the template and the pins: every
-        # condition with a status is pinned, so return the one built before.
-        key = (new_pins, frozenset(hard_pins))
-        evolved = self._evolved.get(key)
-        if evolved is None:
-            if len(self._evolved) >= _EVOLVED_MAX:
-                self._evolved.clear()
-            evolved = cls(
-                conditions=_Pinned(base, new_pinned),
-                _base_cnf=self._base_cnf,
-                _pins=new_pins,
-                _hard_pins=key[1],
-                _condition_symbols=self._condition_symbols,
-                _solver=self._solver,
-                _evolved=self._evolved,
-                _with_status=self._with_status,
-                _base_status=base_status,
-                _order=order,
-            )
-            self._evolved[key] = evolved
+        if len(self._evolved) >= _EVOLVED_MAX:
+            self._evolved.clear()
+        evolved = cls(
+            conditions=_Pinned(base, new_pinned),
+            _base_cnf=self._base_cnf,
+            _pins=new_pins,
+            _hard_pins=key[1],
+            _condition_symbols=self._condition_symbols,
+            _solver=self._solver,
+            _evolved=self._evolved,
+            _with_status=self._with_status,
+            _base_status=base_status,
+            _order=order,
+        )
+        self._evolved[key] = evolved
         return evolved
+
+    def _status_map(self) -> dict[str, bool]:
+        """Every condition with a status, in template order; computed once
+        per Conditions (do not mutate).  An evolved Conditions reads its
+        pin overlay, so the work is O(pins), not O(conditions)."""
+        statuses = self._status_cache
+        if statuses is not None:
+            return statuses
+        conditions = self.conditions
+        if not isinstance(conditions, _Pinned):
+            statuses = {
+                n: c.status for n, c in conditions.items() if c.status is not None
+            }
+        else:
+            base_status, order = self._template_facts()
+            statuses = {
+                n: c.status
+                for n, c in conditions.pinned.items()
+                if c.status is not None
+            }
+            if base_status:
+                for n, v in base_status.items():
+                    statuses.setdefault(n, v)
+                statuses = dict(sorted(statuses.items(), key=lambda kv: order[kv[0]]))
+        object.__setattr__(self, "_status_cache", statuses)
+        return statuses
 
     def is_reachable(self, name: str, value: bool) -> bool:
         """Return whether ``name`` can take ``value`` given the forced facts.
@@ -413,16 +451,24 @@ class Conditions:
             yield self
             return
         assert self._solver is not None
-        models, _ = self._solver.models(
-            [(self._condition_symbols[n], v) for n, v in sorted(self._pins)],
-            [self._condition_symbols[n] for n in names],
-            self._max_scenarios,
-        )
-        for model in models:
-            try:
-                yield self.evolve(dict(zip(names, model)), assumed=True)
-            except Unsatisfiable:
-                pass
+        # The scenarios depend only on this Conditions and the names, and a
+        # resource asks for the same names once per property: keep them.
+        key = tuple(names)
+        scenarios = self._scenario_cache.get(key)
+        if scenarios is None:
+            models, _ = self._solver.models(
+                [(self._condition_symbols[n], v) for n, v in sorted(self._pins)],
+                [self._condition_symbols[n] for n in names],
+                self._max_scenarios,
+            )
+            scenarios = []
+            for model in models:
+                try:
+                    scenarios.append(self.evolve(dict(zip(names, model)), assumed=True))
+                except Unsatisfiable:
+                    pass
+            self._scenario_cache[key] = scenarios
+        yield from scenarios
 
     def evolve_from_instance(
         self, instance: Any, context: "Context"
@@ -443,15 +489,4 @@ class Conditions:
     @property
     def status(self) -> dict[str, bool]:
         """Every condition with a status, in template order."""
-        conditions = self.conditions
-        if not isinstance(conditions, _Pinned):
-            return {n: c.status for n, c in conditions.items() if c.status is not None}
-        base_status, order = self._template_facts()
-        obj = {
-            n: c.status for n, c in conditions.pinned.items() if c.status is not None
-        }
-        if base_status:
-            for n, v in base_status.items():
-                obj.setdefault(n, v)
-            obj = dict(sorted(obj.items(), key=lambda kv: order[kv[0]]))
-        return obj
+        return dict(self._status_map())
