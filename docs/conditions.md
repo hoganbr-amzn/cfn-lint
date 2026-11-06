@@ -65,5 +65,6 @@ Outputs:
 
 # Handling conditions
 
-## SymPy
-[SymPy](https://docs.sympy.org/) is a python package that allows you to build formulas and calculate if a scenario is a legitimate scenario. For instance cfn-lint will build a solver for conditions `IsProduction` and `IsDevelopment` that will calculate the following possibilites `True`/`False`, `False`/`True`, or `False`/`False`. To build a solver cfn-lint will build formulas accordingly `Fn::And` is converted to `And`, `Fn::Or` is converted to `Or`, and `Fn::Not` is converted to `Not`. It will understand `Fn::Equals` that use the same parameter and create a `Not(And(...))` formula that will make sure that the equals in the `And` are no never `True` together.
+## Solving conditions
+cfn-lint builds a boolean formula from the conditions and decides which combinations of condition values a template can take. For instance for conditions `IsProduction` and `IsDevelopment` on one parameter it will calculate the possibilities `True`/`False`, `False`/`True`, or `False`/`False`. `Fn::And` is converted to `And`, `Fn::Or` is converted to `Or`, and `Fn::Not` is converted to `Not`. Two `Fn::Equals` that compare the same parameter to different values can never be `True` together, and a parameter's `AllowedValues` and the template's `Rules` restrict the values further (a `Rules` assertion built from anything other than the condition functions, such as `Fn::Contains`, is not used).
+

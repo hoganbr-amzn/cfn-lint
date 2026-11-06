@@ -5,14 +5,11 @@ SPDX-License-Identifier: MIT-0
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from itertools import product
 from typing import Any, Callable, Iterable, Iterator
 
-from sympy.assumptions.cnf import EncodedCNF
-from sympy.logic.inference import satisfiable
-
 from cfnlint.conditions._boolean import ClauseSet
+from cfnlint.conditions._cdcl import CdclSolver
 
 
 def alternate_ends(
@@ -51,15 +48,6 @@ def alternate_ends(
     return found, truncated
 
 
-@dataclass(frozen=True)
-class _Component:
-    """The clauses of one connected component of the CNF, with their
-    variables renumbered 1..size so the solver only sees these variables."""
-
-    clauses: list[set[int]]
-    size: int
-
-
 class PinSolver:
     """Answers "is ``cnf`` satisfiable with these literals pinned".
 
@@ -69,29 +57,26 @@ class PinSolver:
     so repeating a question (the same scenario for the next resource, the
     same region for the next condition) costs a dictionary lookup.
 
-    A question is solved on the connected components its pins touch rather
-    than on the whole CNF.  Two clauses are connected when they share a
-    variable, so a condition's definition, the Fn::Equals it uses, the other
-    Fn::Equals on the same references and the AllowedValues clauses of those
-    references are all in one component, and a condition about unrelated
-    parameters is in another.  Components share no variable, so the CNF is
-    satisfiable with the pins exactly when every component is: the untouched
-    ones are satisfiable whenever the whole CNF is (checked once), and the
-    touched ones are solved together with the pins.
+    One :class:`CdclSolver` holds the CNF for the life of the lint and takes
+    each pin set as assumptions, so a question costs the propagation the
+    pins cause rather than a read of the whole CNF.
     """
 
     def __init__(self, cnf: ClauseSet) -> None:
         self._cnf = cnf
         self._answers: dict[frozenset[tuple[int, bool]], bool] = {}
         self._models: dict[Any, tuple[list[tuple[bool, ...]], bool]] = {}
-        self._components: list[_Component] | None = None
-        # variable -> (component index, variable number inside the component)
-        self._position: dict[int, tuple[int, int]] = {}
+        self._solver: CdclSolver | None = None
+
+    def _cdcl(self) -> CdclSolver:
+        if self._solver is None:
+            self._solver = CdclSolver(self._cnf.data, len(self._cnf.encoding))
+        return self._solver
 
     def satisfiable(self, pins: Iterable[tuple[Any, bool]]) -> bool:
-        """``pins`` pairs a sympy Symbol of ``cnf`` with the value it is
-        pinned to.  A symbol pinned both ways is unsatisfiable; a symbol that
-        occurs in no clause is free and constrains nothing."""
+        """``pins`` pairs a Symbol of ``cnf`` with the value it is pinned to.
+        A symbol pinned both ways is unsatisfiable; a symbol that occurs in
+        no clause is free and constrains nothing."""
         pinned: dict[Any, bool] = {}
         for symbol, value in pins:
             if pinned.setdefault(symbol, value) != value:
@@ -108,42 +93,7 @@ class PinSolver:
         return answer
 
     def _solve(self, pins: frozenset[tuple[int, bool]]) -> bool:
-        if self._components is None:
-            self._split()
-        assert self._components is not None
-        if not pins:
-            return all(
-                self._is_satisfiable(component.clauses, component.size)
-                for component in self._components
-            )
-        # Every component is satisfiable on its own, or nothing is.
-        if frozenset() not in self._answers:
-            self._answers[frozenset()] = self._solve(frozenset())
-        if not self._answers[frozenset()]:
-            return False
-        touched = sorted({self._position[variable][0] for variable, _ in pins})
-        offset = {}
-        clauses: list[set[int]] = []
-        size = 0
-        for index in touched:
-            component = self._components[index]
-            offset[index] = size
-            if size == 0:
-                clauses.extend(component.clauses)
-            else:
-                clauses.extend(
-                    {
-                        literal + size if literal > 0 else literal - size
-                        for literal in clause
-                    }
-                    for clause in component.clauses
-                )
-            size += component.size
-        for variable, value in pins:
-            index, number = self._position[variable]
-            number += offset[index]
-            clauses.append({number if value else -number})
-        return self._is_satisfiable(clauses, size)
+        return self._cdcl().solve(sorted(v if value else -v for v, value in pins))
 
     def models(
         self,
@@ -151,11 +101,12 @@ class PinSolver:
         free: list[Any],
         limit: int,
     ) -> tuple[list[tuple[bool, ...]], bool]:
-        """The distinct assignments of ``free`` (sympy Symbols) that extend to
-        a model of the CNF with ``pins`` held, in a deterministic order, and
+        """The distinct assignments of ``free`` (Symbols) that extend to a
+        model of the CNF with ``pins`` held, in a deterministic order, and
         whether more than ``limit`` exist (the list is then cut at ``limit``
-        by :func:`alternate_ends`).  A symbol of ``free`` that occurs in no
-        clause is unconstrained and takes both values."""
+        by :func:`alternate_ends`).  A symbol that occurs in no clause is
+        unconstrained: as a pin it constrains nothing, in ``free`` it takes
+        both values."""
         pinned: dict[Any, bool] = {}
         for symbol, value in pins:
             if pinned.setdefault(symbol, value) != value:
@@ -174,7 +125,7 @@ class PinSolver:
         found, truncated = cached
         # Expand back to the order of ``free``: pinned symbols keep their pin,
         # unencoded ones take both values.
-        loose = [s for s in free if s not in encoding and s not in pinned]
+        loose = [s for s in free if s not in encoded_free and s not in pinned]
         out: list[tuple[bool, ...]] = []
         for assignment in found:
             values = dict(zip(encoded_free, assignment))
@@ -190,117 +141,41 @@ class PinSolver:
         self, pins: frozenset[tuple[int, bool]], free: list[int], limit: int
     ) -> tuple[list[tuple[bool, ...]], bool]:
         """Depth-first over ``free`` in order, keeping a prefix only when the
-        touched components stay satisfiable with the pins and the prefix as
-        unit clauses, so only prefixes of satisfiable assignments are solved
-        and the work is one solve per feasible prefix rather than 2^len(free)
-        attempts.  Each prefix is solved once however many times the walks
-        reach it."""
-        if self._components is None:
-            self._split()
-        assert self._components is not None
-        if frozenset() not in self._answers:
-            self._answers[frozenset()] = self._solve(frozenset())
-        if not self._answers[frozenset()]:
-            return [], False
-        variables = {v for v, _ in pins} | set(free)
-        touched = sorted({self._position[v][0] for v in variables})
-        offset: dict[int, int] = {}
-        clauses: list[set[int]] = []
-        size = 0
-        for index in touched:
-            component = self._components[index]
-            offset[index] = size
-            clauses.extend(
-                {lit + size if lit > 0 else lit - size for lit in clause}
-                for clause in component.clauses
-            )
-            size += component.size
+        CNF stays satisfiable under the pins and the prefix as assumptions.
+        Each step is one assumption solve, and a prefix is solved once
+        however many times the walks reach it."""
+        solver = self._cdcl()
+        base = [v if value else -v for v, value in pins]
+        cache: dict[tuple[int, ...], bool] = {}
 
-        def local(variable: int) -> int:
-            index, number = self._position[variable]
-            return number + offset[index]
-
-        for variable, value in sorted(pins):
-            clauses.append({local(variable) if value else -local(variable)})
-        numbers = [local(v) for v in free]
-        n = len(free)
-        cache: dict[tuple[bool, ...], bool] = {}
-
-        def feasible(prefix: tuple[bool, ...]) -> bool:
-            answer = cache.get(prefix)
+        def feasible(assigned: list[int]) -> bool:
+            assumptions = tuple(sorted(base + assigned))
+            answer = cache.get(assumptions)
             if answer is None:
-                units = [
-                    {number if value else -number}
-                    for number, value in zip(numbers, prefix)
-                ]
-                answer = cache[prefix] = self._is_satisfiable(clauses + units, size)
+                answer = cache[assumptions] = solver.solve(assumptions)
             return answer
 
-        if not feasible(()):
+        if not feasible([]):
             return [], False
+        n = len(free)
 
         def walk(first: bool) -> Iterator[tuple[bool, ...]]:
-            def descend(prefix: tuple[bool, ...]) -> Iterator[tuple[bool, ...]]:
-                if len(prefix) == n:
-                    yield prefix
-                    return
-                for value in (first, not first):
-                    if feasible(prefix + (value,)):
-                        yield from descend(prefix + (value,))
+            assigned: list[int] = []
+            current: list[bool] = []
 
-            return descend(())
+            def descend(depth: int) -> Iterator[tuple[bool, ...]]:
+                if depth == n:
+                    yield tuple(current)
+                    return
+                variable = free[depth]
+                for value in (first, not first):
+                    assigned.append(variable if value else -variable)
+                    current.append(value)
+                    if feasible(assigned):
+                        yield from descend(depth + 1)
+                    current.pop()
+                    assigned.pop()
+
+            return descend(0)
 
         return alternate_ends(walk, limit)
-
-    @staticmethod
-    def _is_satisfiable(clauses: list[set[int]], size: int) -> bool:
-        encoded = EncodedCNF(clauses, {n: n for n in range(1, size + 1)})
-        return bool(satisfiable(encoded))
-
-    def _split(self) -> None:
-        """Group the clauses into connected components (union-find over
-        the variables) and renumber each component's variables from 1."""
-        parent: dict[int, int] = {}
-
-        def find(x: int) -> int:
-            while parent.setdefault(x, x) != x:
-                parent[x] = parent[parent[x]]
-                x = parent[x]
-            return x
-
-        for clause in self._cnf.data:
-            variables = [abs(literal) for literal in clause if literal != 0]
-            for other in variables[1:]:
-                a, b = find(variables[0]), find(other)
-                if a != b:
-                    parent[a] = b
-
-        members: dict[int, int] = {}
-        components: list[list[set[int]]] = []
-        sizes: list[int] = []
-        for clause in self._cnf.data:
-            variables = [abs(literal) for literal in clause if literal != 0]
-            if not variables:
-                root = -1  # the empty clause, or {0}: false on its own
-            else:
-                root = find(variables[0])
-            index = members.get(root)
-            if index is None:
-                index = members[root] = len(components)
-                components.append([])
-                sizes.append(0)
-            renumbered = set()
-            for literal in clause:
-                if literal == 0:
-                    renumbered.add(0)
-                    continue
-                variable = abs(literal)
-                if variable not in self._position:
-                    sizes[index] += 1
-                    self._position[variable] = (index, sizes[index])
-                number = self._position[variable][1]
-                renumbered.add(number if literal > 0 else -number)
-            components[index].append(renumbered)
-        self._components = [
-            _Component(clauses, size) for clauses, size in zip(components, sizes)
-        ]

@@ -8,10 +8,10 @@ import json
 from unittest.mock import patch
 
 import pytest
-from sympy.logic.inference import satisfiable
 
 from cfnlint.api import ManualArgs, lint
 from cfnlint.conditions._boolean import Not, Symbol
+from cfnlint.conditions._solver import PinSolver
 from cfnlint.context import create_context_for_template
 from cfnlint.context.conditions._condition import Condition
 from cfnlint.context.conditions._conditions import Conditions, _Pinned
@@ -461,7 +461,7 @@ def test_condition_failures():
 def test_condition_non_string_names_skipped():
     # Regression test for https://github.com/aws-cloudformation/cfn-lint/issues/4813
     # A non-string condition logical ID must not crash create_from_instance
-    # (sympy Symbol requires a string name).  The invalid name is skipped
+    # (the solver Symbol requires a string name).  The invalid name is skipped
     # here and reported by rule E8001.
     conditions = Conditions.create_from_instance(
         {123: {"Fn::Equals": ["a", "b"]}, "IsValid": {"Fn::Equals": ["a", "b"]}},
@@ -558,6 +558,27 @@ def test_or_of_and_pairs_does_not_explode():
     assert not_prod.is_reachable("IsDeployed", True) is False
 
 
+class _SolveCounter:
+    """Counts the sets of pins the solver actually solves."""
+
+    def __init__(self):
+        self._pin = patch.object(
+            PinSolver, "_solve", autospec=True, side_effect=PinSolver._solve
+        )
+
+    def __enter__(self):
+        self._pin_mock = self._pin.__enter__()
+        return self
+
+    def __exit__(self, *exc):
+        self._pin.__exit__(*exc)
+        return False
+
+    @property
+    def call_count(self):
+        return self._pin_mock.call_count
+
+
 def test_each_set_of_pins_is_solved_once():
     """Every Fn::If and condition scenario asks whether its pins are
     satisfiable, and most ask about the same pins. Solving each set once
@@ -566,10 +587,10 @@ def test_each_set_of_pins_is_solved_once():
     cfn = Template(None, template(), regions=["us-east-1"])
     base = create_context_for_template(cfn).conditions
 
-    with patch("cfnlint.conditions._solver.satisfiable", wraps=satisfiable) as solver:
+    with _SolveCounter() as solver:
         first = base.evolve({"IsUsEast1": True})
         # The first question also checks, once, that the template's clauses
-        # are satisfiable on their own (one solve per connected component).
+        # are satisfiable on their own.
         calls = solver.call_count
         base.evolve({"IsUsEast1": True})
         base.evolve({"IsUsEast1": True}, assumed=True)
@@ -658,9 +679,7 @@ def test_solver_calls_do_not_grow_with_reused_conditions():
     many such resources there are (issue #4991)."""
     calls = []
     for alarms in (5, 20):
-        with patch(
-            "cfnlint.conditions._solver.satisfiable", wraps=satisfiable
-        ) as solver:
+        with _SolveCounter() as solver:
             matches = lint(
                 json.dumps(_alarms_reusing_conditions(alarms)),
                 config=ManualArgs(regions=["us-east-1"]),
@@ -1053,8 +1072,8 @@ def _queues_with_shared_conditions(n, private=2, shared=6):
 
 def test_evolved_conditions_hold_only_their_pins():
     """An evolved Conditions lays its pins over the template's condition dict
-    instead of copying every condition (one full dict per
-    scenario reached 2 GB on 400 queues)."""
+    instead of copying every condition (one full dict per scenario reached
+    2 GB on 400 queues)."""
     cfn = Template("", _queues_with_shared_conditions(50))
     root = create_context_for_template(cfn).conditions
     assert isinstance(root.conditions, dict)
