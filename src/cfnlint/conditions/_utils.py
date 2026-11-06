@@ -123,6 +123,38 @@ def add_equivalence(cnf: EncodedCNF, symbol: Boolean, expr: Boolean) -> None:
         cnf.add_prop(Equivalent(symbol, literal))
 
 
+def add_constraint(cnf: EncodedCNF, expr: Boolean) -> None:
+    """Add ``expr`` to ``cnf`` as a constraint without exponential growth.
+
+    Like ``add_equivalence`` this gives every And/Or subterm an auxiliary
+    variable, so an Or of n Ands costs a linear number of clauses rather than
+    the 2^n of sympy's distributive conversion.
+    """
+    cnf.add_prop(_tseitin(cnf, expr, {}))
+
+
+def add_at_most_one(cnf: EncodedCNF, literals: list[Any]) -> None:
+    """Add "at most one of ``literals`` is true" to ``cnf``.
+
+    Up to five literals get the pairwise clauses ``Not(a & b)``. Longer
+    lists get the binary encoding: ``ceil(log2 n)`` auxiliary bits, and
+    each literal implies its own bit pattern, so two literals cannot both
+    be true. That is ``n * ceil(log2 n)`` clauses instead of ``n(n-1)/2``.
+    The bits are determined by the literals, so satisfiability with any
+    constraint over the original variables is unchanged.
+    """
+    if len(literals) <= 5:
+        for i, a in enumerate(literals):
+            for b in literals[i + 1 :]:
+                cnf.add_prop(Not(And(a, b)))
+        return
+    width = (len(literals) - 1).bit_length()
+    bits = [Dummy("at_most_one") for _ in range(width)]
+    for code, literal in enumerate(literals):
+        for k, bit in enumerate(bits):
+            cnf.add_prop(Or(Not(literal), bit if (code >> k) & 1 else Not(bit)))
+
+
 def _tseitin(
     cnf: EncodedCNF, expr: Any, cache: dict[Any, Any], root: Any = None
 ) -> Any:

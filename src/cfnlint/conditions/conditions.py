@@ -20,7 +20,13 @@ from cfnlint.conditions._condition import ConditionMemo, ConditionNamed
 from cfnlint.conditions._equals import Equal, EqualParameter
 from cfnlint.conditions._errors import UnknownSatisfisfaction
 from cfnlint.conditions._rule import Rule
-from cfnlint.conditions._utils import add_equivalence, cfn_string, get_hash
+from cfnlint.conditions._utils import (
+    add_at_most_one,
+    add_constraint,
+    add_equivalence,
+    cfn_string,
+    get_hash,
+)
 from cfnlint.helpers import get_partition
 
 LOGGER = logging.getLogger(__name__)
@@ -124,6 +130,9 @@ class Conditions:
 
         equals: dict[str, Equal] = {}
 
+        # Fn::Equals hash -> hashes of the parameters it compares
+        by_parameter: dict[str, list[str]] = {}
+
         def _build_equal_vars(c_equals: list[Equal]):
             for c_equal in c_equals:
                 if c_equal.hash in equal_vars:
@@ -140,21 +149,11 @@ class Conditions:
                     # parameter's value.  Two of them on one parameter with
                     # different literals are exclusive; a Ref-vs-Ref
                     # Fn::Equals (P == Q) is not exclusive with P == "x" (P
-                    # and Q can both be "x") nor with P == R.
+                    # and Q can both be "x") nor with P == R, so it joins no
+                    # group.
                     if _has_literal(c_equal):
-                        # See if parameter in this equals is the same as
-                        # another literal equals
                         for param in c_equal.parameters:
-                            for e_hash, e_equals in equals.items():
-                                if param in e_equals.parameters and _has_literal(
-                                    e_equals
-                                ):
-                                    # equivalent to NAND logic. We want to make
-                                    # sure that both equals are not both True
-                                    # at the same time
-                                    cnf.add_prop(
-                                        ~(equal_vars[c_equal.hash] & equal_vars[e_hash])
-                                    )
+                            by_parameter.setdefault(param.hash, []).append(c_equal.hash)
                 equals[c_equal.hash] = c_equal
 
         for rule in self._rules:
@@ -162,6 +161,11 @@ class Conditions:
 
         for condition_name in condition_names:
             _build_equal_vars(self._conditions[condition_name].equals)
+
+        # Two Fn::Equals that compare the same parameter to different
+        # literals cannot both be true (NAND).
+        for hashes in by_parameter.values():
+            add_at_most_one(cnf, [equal_vars[h] for h in hashes])
 
         # Determine if a set of conditions can never be all false
         allowed_values = {k: list(v) for k, v in self._parameters.items()}
@@ -190,20 +194,19 @@ class Conditions:
                 # means the list is empty and all allowed values are validated
                 # so not all equals can be false
                 if not allowed_value:
-                    prop = None
+                    # one And over every Not(equal) instead of a chain of
+                    # binary Ands, each re-flattening the one before
+                    parts = []
                     for _, equal_1 in equals.items():
                         for param in equal_1.parameters:
                             if allowed_hash == param.hash:
-                                if prop is None:
-                                    prop = Not(equal_vars[equal_1.hash])
-                                else:
-                                    prop = prop & Not(equal_vars[equal_1.hash])
+                                parts.append(Not(equal_vars[equal_1.hash]))
                     # Need to make sure they aren't all False
                     # So Not(Not(Equal1) & Not(Equal2))
                     # When Equal1 False and Equal2 False
                     # Not(True & True) = False allowing this not to happen
-                    if prop is not None:
-                        cnf.add_prop(Not(prop))
+                    if parts:
+                        cnf.add_prop(Not(And(*parts)))
 
         # Create a Symbol per condition name and add implication constraints
         # so that build_true_cnf/build_false_cnf can use the simple Symbol
@@ -230,7 +233,7 @@ class Conditions:
         equal_vars.update(cond_symbols)
 
         for rule in self._rules:
-            cnf.add_prop(rule.build_cnf(equal_vars))
+            add_constraint(cnf, rule.build_cnf(equal_vars))
 
         return (cnf, equal_vars)
 
