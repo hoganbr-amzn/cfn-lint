@@ -10,6 +10,7 @@ import pytest
 
 from cfnlint.jsonschema.exceptions import ValidationError
 from cfnlint.jsonschema.validators import CfnTemplateValidator
+from cfnlint.template import Template
 
 
 def fail(validator, errors, instance, schema):
@@ -1252,3 +1253,15 @@ def test_messages(name, schema, instance, expected, validator):
     validator = validator.evolve(schema=schema)
     errs = list(validator.iter_errors(instance))
     assert sorted(errs) == sorted(expected), f"{name!r} returned {errs!r}"
+
+
+def test_validators_without_a_template_share_one():
+    """A validator built without a template gets the same empty Template as
+    every other, so creating validators does not build Conditions, Graph
+    and Context each time; a validator given a template keeps its own."""
+    first = CfnTemplateValidator({})
+    second = CfnTemplateValidator({"type": "string"})
+    assert first.cfn is second.cfn
+    assert first.cfn.template == {}
+    own = first.evolve(cfn=Template(None, {"Resources": {}}))
+    assert own.cfn is not first.cfn
