@@ -568,26 +568,29 @@ def test_each_set_of_pins_is_solved_once():
         "cfnlint.conditions._solver.satisfiable", wraps=satisfiable
     ) as solver:
         first = base.evolve({"IsUsEast1": True})
+        # The first question also checks, once, that the template's clauses
+        # are satisfiable on their own (one solve per connected component).
+        calls = solver.call_count
         base.evolve({"IsUsEast1": True})
         base.evolve({"IsUsEast1": True}, assumed=True)
-        assert solver.call_count == 1
+        assert solver.call_count == calls
 
         # The same pins reached in a different order or from another branch.
         first.evolve({"IsProd": True})
         base.evolve({"IsProd": True}).evolve({"IsUsEast1": True})
         base.evolve({"IsProd": True, "IsUsEast1": True})
-        assert solver.call_count == 3
+        assert solver.call_count == calls + 2
 
         # A reachability question is a set of pins too.
         assert first.is_reachable("IsProd", True) is True
         assert first.evolve({"IsProd": True}).is_reachable("IsUsEast1", True)
-        assert solver.call_count == 3
+        assert solver.call_count == calls + 2
 
         # An unsatisfiable set is remembered as well.
         for _ in range(2):
             with pytest.raises(Unsatisfiable):
                 first.evolve({"IsUsWest2": True})
-        assert solver.call_count == 4
+        assert solver.call_count == calls + 3
 
 
 def test_pins_keep_facts_and_assumptions_apart():
