@@ -14,7 +14,7 @@ from sympy.logic.inference import satisfiable
 from cfnlint.api import ManualArgs, lint
 from cfnlint.context import create_context_for_template
 from cfnlint.context.conditions._condition import Condition
-from cfnlint.context.conditions._conditions import Conditions
+from cfnlint.context.conditions._conditions import Conditions, _Pinned
 from cfnlint.context.conditions.exceptions import Unsatisfiable
 from cfnlint.template import Template
 
@@ -1050,3 +1050,112 @@ def test_long_condition_chain_in_either_order(top_down):
     pinned = conditions.evolve({last: True})
     assert pinned.is_reachable("C0", n % 2 == 1)
     assert not pinned.is_reachable("C0", n % 2 == 0)
+
+
+def _queues_with_shared_conditions(n, private=2, shared=6):
+    """n SQS queues, each with 8 properties set by Fn::If on 8 conditions: 2
+    private to the queue and 6 shared, so the lint asks up to 128 scenarios
+    per queue over 2n + 6 conditions."""
+    props = [
+        ("DelaySeconds", 0, 5),
+        ("MaximumMessageSize", 1024, 2048),
+        ("MessageRetentionPeriod", 60, 120),
+        ("ReceiveMessageWaitTimeSeconds", 0, 10),
+        ("VisibilityTimeout", 30, 60),
+        ("KmsDataKeyReusePeriodSeconds", 300, 600),
+        ("SqsManagedSseEnabled", True, False),
+        ("QueueName", None, None),
+    ]
+    params = {f"S{j}": {"Type": "String"} for j in range(shared)}
+    conds = {f"S{j}": {"Fn::Equals": [{"Ref": f"S{j}"}, "a"]} for j in range(shared)}
+    res = {}
+    for i in range(n):
+        p = {}
+        for j, (name, a, b) in enumerate(props):
+            if j < private:
+                params[f"P{i}x{j}"] = {"Type": "String"}
+                conds[f"C{i}x{j}"] = {"Fn::Equals": [{"Ref": f"P{i}x{j}"}, "a"]}
+                c = f"C{i}x{j}"
+            else:
+                c = f"S{j - private}"
+            p[name] = (
+                {"Fn::If": [c, f"q{i}-a", f"q{i}-b"]}
+                if a is None
+                else {"Fn::If": [c, a, b]}
+            )
+        res[f"Queue{i}"] = {"Type": "AWS::SQS::Queue", "Properties": p}
+    return {"Parameters": params, "Conditions": conds, "Resources": res}
+
+
+def test_evolved_conditions_hold_only_their_pins():
+    """An evolved Conditions lays its pins over the template's condition dict
+    instead of copying every condition (one full dict per
+    scenario reached 2 GB on 400 queues)."""
+    cfn = Template("", _queues_with_shared_conditions(50))
+    root = create_context_for_template(cfn).conditions
+    assert isinstance(root.conditions, dict)
+    names = list(root.conditions)
+    assert len(names) == 106
+
+    first = root.evolve({"S0": True, "C3x1": False})
+    second = first.evolve({"C7x0": True}, assumed=True)
+    for evolved, pinned in ((first, 2), (second, 3)):
+        assert isinstance(evolved.conditions, _Pinned)
+        assert evolved.conditions.base is root.conditions
+        assert len(evolved.conditions.pinned) == pinned
+        # the mapping still reads as the whole template
+        assert list(evolved.conditions) == names
+        assert len(evolved.conditions) == 106
+        assert "S5" in evolved.conditions and evolved.conditions["S5"].status is None
+        assert evolved.conditions.get("Nope") is None
+    assert first.conditions["S0"].status is True
+    assert first.conditions["C3x1"].status is False
+    assert second.conditions["C7x0"].status is True
+    # statuses come back in template order, whatever the pin order
+    assert list(second.status) == ["S0", "C3x1", "C7x0"]
+    assert second.status == {"S0": True, "C3x1": False, "C7x0": True}
+    assert second._hard_pins == frozenset({("S0", True), ("C3x1", False)})
+    assert second._pins == frozenset({("S0", True), ("C3x1", False), ("C7x0", True)})
+    # the same pins give the same object whatever the order of the pins
+    assert root.evolve({"C3x1": False}).evolve({"S0": True}) is first
+    with pytest.raises(Unsatisfiable):
+        second.evolve({"S0": False})
+    # a mapping that equals the dict it would have been
+    assert dict(second.conditions) == {
+        **root.conditions,
+        "S0": first.conditions["S0"],
+        "C3x1": first.conditions["C3x1"],
+        "C7x0": second.conditions["C7x0"],
+    }
+
+
+def test_evolved_memo_is_bounded():
+    """The memo of evolved Conditions is emptied past _EVOLVED_MAX entries
+    and evolving keeps working."""
+    cfn = Template("", _queues_with_shared_conditions(4))
+    root = create_context_for_template(cfn).conditions
+    with patch("cfnlint.context.conditions._conditions._EVOLVED_MAX", 8):
+        kept = []
+        for i in range(4):
+            for j in range(2):
+                for value in (True, False):
+                    evolved = root.evolve({f"C{i}x{j}": value})
+                    assert evolved.status == {f"C{i}x{j}": value}
+                    kept.append(evolved)
+        assert len({id(c) for c in kept}) == 16
+        assert len(root._evolved) <= 8
+
+
+def test_lint_memory_does_not_grow_with_scenarios():
+    """Linting many queues keeps one small dict per scenario: the evolved
+    memo holds no copy of the template's conditions."""
+    cfn = Template("", _queues_with_shared_conditions(30))
+    root = create_context_for_template(cfn).conditions
+    for name, resource in cfn.template["Resources"].items():
+        for _ in root.evolve_from_instance(
+            resource["Properties"], create_context_for_template(cfn)
+        ):
+            pass
+    assert len(root._evolved) > 1000
+    assert max(len(c.conditions.pinned) for c in root._evolved.values()) <= 8
+    assert all(c.conditions.base is root.conditions for c in root._evolved.values())
