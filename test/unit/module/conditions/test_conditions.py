@@ -145,6 +145,32 @@ class TestConditions(TestCase):
         self.assertTrue(satisfiable({"IsStageOrOther": True}, {"Env": "dev"}))
         self.assertTrue(satisfiable({"IsStageOrOther": False}, {"Env": "dev"}))
 
+    def test_build_scenarios_in_a_region(self):
+        """With a region, every condition gets a value in each scenario, and a
+        condition decided by the region takes only that value"""
+        cfn = Template(
+            "",
+            {
+                "Parameters": {"Env": {"Type": "String"}},
+                "Conditions": {
+                    "IsEast": {"Fn::Equals": [{"Ref": "AWS::Region"}, "us-east-1"]},
+                    "IsWest": {"Fn::Equals": [{"Ref": "AWS::Region"}, "us-west-2"]},
+                    "IsProd": {"Fn::Equals": [{"Ref": "Env"}, "prod"]},
+                },
+            },
+        )
+        self.assertEqual(
+            list(
+                cfn.conditions.build_scenarios(
+                    {"IsEast": None, "IsWest": None, "IsProd": None}, "us-east-1"
+                )
+            ),
+            [
+                {"IsEast": True, "IsProd": True, "IsWest": False},
+                {"IsEast": True, "IsProd": False, "IsWest": False},
+            ],
+        )
+
     def test_check_implies(self):
         """We properly validate implies scenarios"""
         template = {
