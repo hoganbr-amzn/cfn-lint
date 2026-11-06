@@ -6,14 +6,20 @@ SPDX-License-Identifier: MIT-0
 from __future__ import annotations
 
 import itertools
+from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Iterator
 
-from sympy import Not, Or, Symbol
+from sympy import And, Implies, Not, Or, Symbol
 from sympy.assumptions.cnf import EncodedCNF
 
 from cfnlint.conditions._solver import PinSolver
-from cfnlint.conditions._utils import add_at_most_one, add_equivalence, get_hash
+from cfnlint.conditions._utils import (
+    add_at_most_one,
+    add_constraint,
+    add_equivalence,
+    get_hash,
+)
 from cfnlint.context.conditions._condition import Condition, ConditionMemo
 from cfnlint.context.conditions._equals import Equal
 from cfnlint.context.conditions._utils import (
@@ -119,10 +125,35 @@ class Conditions:
             # Add equivalence: Symbol(name) <-> condition's boolean expression
             add_equivalence(cnf, sym, cond.cnf)
 
+        # Rules restrict the parameter values, so they constrain conditions
+        # as in the template-level engine: RuleCondition -> And(Assertions).
+        # A rule that uses anything but condition functions is left out.
+        # Work on a copy: building an Fn::Equals sorts its list in place, and
+        # W8003 reports the Rules section's own text.
+        rule_exprs: list[Any] = []
+        rule_conditions: list[Condition] = []
+        for rule in deepcopy(rules).values() if isinstance(rules, dict) else []:
+            try:
+                parts = [
+                    Condition.create_from_instance(a["Assert"], conditions, memo)
+                    for a in rule["Assertions"]
+                ]
+                expr = And(*[c.cnf for c in parts])
+                if rule.get("RuleCondition"):
+                    when = Condition.create_from_instance(
+                        rule["RuleCondition"], conditions, memo
+                    )
+                    parts.append(when)
+                    expr = Implies(when.cnf, expr)
+            except (ValueError, KeyError, TypeError, AttributeError):
+                continue
+            rule_conditions.extend(parts)
+            rule_exprs.append(expr)
+
         # A condition's equals includes those of every condition it references,
         # so visit each distinct Fn::Equals once (#4984).
         distinct_equals: dict[str, Equal] = {}
-        for _, c_v in obj.items():
+        for c_v in [*obj.values(), *rule_conditions]:
             for i in c_v.equals:
                 distinct_equals.setdefault(i.hash, i)
 
@@ -169,6 +200,9 @@ class Conditions:
 
             if not allowed_values and equals_cnfs:
                 cnf.add_prop(Or(*equals_cnfs))
+
+        for expr in rule_exprs:
+            add_constraint(cnf, expr)
 
         return cls(
             conditions=obj,

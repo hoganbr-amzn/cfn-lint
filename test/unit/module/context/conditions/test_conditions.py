@@ -759,3 +759,51 @@ def test_static_equals_is_a_constant(equals, always):
     assert conditions.is_reachable("Static", always)
     assert not conditions.is_reachable("Static", not always)
     assert cfn.conditions.is_always_true("Static") is always
+
+
+def test_rules_restrict_conditions():
+    """A Rules assertion restricts parameter values for context checks, as it
+    does in the template-level engine."""
+    cfn = Template(
+        "",
+        {
+            "Parameters": {
+                "Env": {"Type": "String", "AllowedValues": ["dev", "prod"]},
+                "Region": {"Type": "String"},
+            },
+            "Rules": {
+                "ProdOnly": {"Assertions": [{"Assert": {"Condition": "IsProd"}}]},
+                "EastWhenProd": {
+                    "RuleCondition": {"Fn::Equals": [{"Ref": "Env"}, "prod"]},
+                    "Assertions": [
+                        {"Assert": {"Fn::Equals": [{"Ref": "Region"}, "east"]}}
+                    ],
+                },
+                "Ignored": {
+                    "Assertions": [
+                        {"Assert": {"Fn::Contains": [["a"], {"Ref": "Env"}]}}
+                    ]
+                },
+            },
+            "Conditions": {
+                "IsProd": {"Fn::Equals": [{"Ref": "Env"}, "prod"]},
+                "IsDev": {"Fn::Equals": [{"Ref": "Env"}, "dev"]},
+                "IsWest": {"Fn::Equals": [{"Ref": "Region"}, "west"]},
+            },
+            "Resources": {},
+        },
+    )
+    conditions = create_context_for_template(cfn).conditions
+    # the template's Rules are read, not reordered
+    assert cfn.template["Rules"]["EastWhenProd"]["RuleCondition"] == {
+        "Fn::Equals": [{"Ref": "Env"}, "prod"]
+    }
+    assert not conditions.is_reachable("IsDev", True)
+    assert not conditions.is_reachable("IsProd", False)
+    assert not conditions.is_reachable("IsWest", True)
+    assert conditions.is_reachable("IsWest", False)
+    # the template-level engine gives the same answers
+    assert cfn.conditions.is_always_true("IsProd")
+    assert list(cfn.conditions.build_scenarios({"IsWest": None})) == [
+        {"IsWest": False}
+    ]
