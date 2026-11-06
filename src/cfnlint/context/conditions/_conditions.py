@@ -13,7 +13,7 @@ from sympy import Not, Or, Symbol
 from sympy.assumptions.cnf import EncodedCNF
 from sympy.logic.inference import satisfiable
 
-from cfnlint.conditions._utils import add_equivalence, get_hash
+from cfnlint.conditions._utils import add_equivalence, cfn_string, get_hash
 from cfnlint.context.conditions._condition import Condition
 from cfnlint.context.conditions._equals import Equal
 from cfnlint.context.conditions._utils import (
@@ -140,6 +140,8 @@ class Conditions:
             if not p_v.allowed_values:
                 continue
             allowed_values = p_v.allowed_values.copy()
+            if isinstance(allowed_values, list):
+                allowed_values = [cfn_string(v) for v in allowed_values]
             p_hash = get_hash({"Ref": p_k})
             equals_cnfs: list[Symbol] = []
             for i in distinct_equals.values():

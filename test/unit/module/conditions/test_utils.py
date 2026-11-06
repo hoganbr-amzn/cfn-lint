@@ -18,6 +18,7 @@ from cfnlint.conditions._utils import (
     _cached_hash,
     _make_hashable,
     add_equivalence,
+    cfn_string,
     get_hash,
 )
 
@@ -87,6 +88,19 @@ class TestUtils(unittest.TestCase):
         # the same value still hashes the same, whatever was asked first
         self.assertEqual(get_hash([{"Ref": "P"}, True]), get_hash([{"Ref": "P"}, True]))
         self.assertEqual(get_hash(1), get_hash(1))
+
+    def test_cfn_string(self):
+        """Literals become the strings CloudFormation compares."""
+        self.assertEqual(cfn_string(True), "true")
+        self.assertEqual(cfn_string(False), "false")
+        self.assertEqual(cfn_string("True"), "True")
+        self.assertEqual(cfn_string("true"), "true")
+        self.assertEqual(cfn_string(1), "1")
+        self.assertEqual(cfn_string(0), "0")
+        self.assertEqual(cfn_string(1.0), "1.0")
+        self.assertEqual(cfn_string("1"), "1")
+        self.assertEqual(cfn_string({"Ref": "P"}), {"Ref": "P"})
+        self.assertEqual(cfn_string(None), None)
 
     def test_make_hashable_dict(self):
         """Test _make_hashable with dictionaries"""

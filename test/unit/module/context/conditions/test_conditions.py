@@ -758,3 +758,76 @@ def test_true_and_one_are_different_equals():
     # P0 = "1" satisfies neither; the two equals are still exclusive
     with pytest.raises(Unsatisfiable):
         conditions.evolve({"C0": True, "T": False})
+
+
+def test_literals_compare_as_cloudformation_strings():
+    """CloudFormation compares Fn::Equals operands as strings and writes a
+    boolean as true/false: true equals "true" but not "True" or 1, 1 equals
+    "1" but not 1.0, false equals neither 0 nor "False"."""
+    cases = {
+        "BoolTrue": ([True, "true"], True),
+        "BoolCase": ([True, "True"], False),
+        "BoolOne": ([True, 1], False),
+        "FalseZero": ([False, 0], False),
+        "FalseStr": (["false", False], True),
+        "IntStr": (["1", 1], True),
+        "IntFloat": ([1, 1.0], False),
+    }
+    conditions = Conditions.create_from_instance(
+        {k: {"Fn::Equals": v} for k, (v, _) in cases.items()}, {}, {}
+    )
+    for name, (_, expected) in cases.items():
+        (equal,) = conditions.conditions[name].equals
+        assert equal.is_static is expected, name
+
+
+def test_bool_and_string_literal_are_one_equals():
+    """Fn::Equals [Ref P, true] and [Ref P, "true"] are one comparison, so
+    pinning one pins the other; the template keeps its boolean."""
+    instance = {
+        "A": {"Fn::Equals": [{"Ref": "P"}, True]},
+        "B": {"Fn::Equals": ["true", {"Ref": "P"}]},
+        "C": {"Fn::Equals": [{"Ref": "P"}, 1]},
+    }
+    conditions = Conditions.create_from_instance(instance, {}, {})
+    (a,) = conditions.conditions["A"].equals
+    (b,) = conditions.conditions["B"].equals
+    (c,) = conditions.conditions["C"].equals
+    assert a.hash == b.hash
+    assert a.hash != c.hash
+    assert True in instance["A"]["Fn::Equals"]
+    with pytest.raises(Unsatisfiable):
+        conditions.evolve({"A": True, "B": False})
+    # P = "true" makes A and B true and C false
+    assert conditions.evolve({"A": True, "B": True}).status == {"A": True, "B": True}
+    with pytest.raises(Unsatisfiable):
+        conditions.evolve({"A": True, "C": True})
+
+
+def test_allowed_values_compare_as_cloudformation_strings():
+    """AllowedValues [true, false] are "true" and "false", and [1, 2] are
+    "1" and "2", so the equals over each list cannot all be false."""
+    cfn = Template(
+        None,
+        {
+            "Parameters": {
+                "P": {"Type": "String", "AllowedValues": [True, False]},
+                "N": {"Type": "Number", "AllowedValues": [1, 2]},
+            },
+            "Conditions": {
+                "T": {"Fn::Equals": [{"Ref": "P"}, "true"]},
+                "F": {"Fn::Equals": [{"Ref": "P"}, False]},
+                "One": {"Fn::Equals": [{"Ref": "N"}, "1"]},
+                "Two": {"Fn::Equals": [{"Ref": "N"}, 2]},
+            },
+        },
+        regions=["us-east-1"],
+    )
+    conditions = create_context_for_template(cfn).conditions
+    with pytest.raises(Unsatisfiable):
+        conditions.evolve({"T": False, "F": False})
+    with pytest.raises(Unsatisfiable):
+        conditions.evolve({"One": False, "Two": False})
+    with pytest.raises(Unsatisfiable):
+        conditions.evolve({"T": True, "F": True})
+    conditions.evolve({"T": True, "F": False})

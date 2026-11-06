@@ -20,7 +20,7 @@ from cfnlint.conditions._condition import ConditionNamed
 from cfnlint.conditions._equals import Equal, EqualParameter
 from cfnlint.conditions._errors import UnknownSatisfisfaction
 from cfnlint.conditions._rule import Rule
-from cfnlint.conditions._utils import add_equivalence, get_hash
+from cfnlint.conditions._utils import add_equivalence, cfn_string, get_hash
 from cfnlint.helpers import get_partition
 
 LOGGER = logging.getLogger(__name__)
@@ -80,7 +80,9 @@ class Conditions:
             self._parameters[param_hash] = []
             for allowed_value in allowed_values:
                 if isinstance(allowed_value, (str, int, float, bool)):
-                    self._parameters[param_hash].append(get_hash(str(allowed_value)))
+                    self._parameters[param_hash].append(
+                        get_hash(str(cfn_string(allowed_value)))
+                    )
 
     def _init_rules(self, cfn: Any) -> None:
         rules = cfn.template.get("Rules")
