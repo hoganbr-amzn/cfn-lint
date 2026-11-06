@@ -236,8 +236,11 @@ class Conditions:
 
     def _build_conditions(self, conditions: set[str]) -> Iterator["Conditions"]:
         scenarios_attempted = 0
-        for product in itertools.product([True, False], repeat=len(conditions)):
-            params = dict(zip(conditions, product))
+        # ``conditions`` is a set; sort it so the scenarios tried before the
+        # cap, and their order, do not depend on the hash seed.
+        names = sorted(conditions, key=str)
+        for product in itertools.product([True, False], repeat=len(names)):
+            params = dict(zip(names, product))
             try:
                 yield self.evolve(params, assumed=True)
             except Unsatisfiable:
