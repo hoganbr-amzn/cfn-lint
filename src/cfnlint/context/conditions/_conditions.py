@@ -5,6 +5,7 @@ SPDX-License-Identifier: MIT-0
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Iterator
@@ -33,9 +34,41 @@ if TYPE_CHECKING:
     from cfnlint.context.context import Context, Parameter
 
 
+class _Pinned(Mapping):
+    """The template's conditions, with the ones pinned so far replacing
+    their unpinned selves.  An evolved Conditions holds one of these (a
+    small dict of pins over the shared template dict) instead of a copy
+    of every condition, so a lint with many resources and scenarios keeps
+    O(pins) per scenario, not O(conditions)."""
+
+    __slots__ = ("base", "pinned")
+
+    def __init__(self, base: dict[str, Condition], pinned: dict[str, Condition]):
+        self.base = base
+        self.pinned = pinned  # in template order, a subset of base's keys
+
+    def __getitem__(self, name: str) -> Condition:
+        condition = self.pinned.get(name)
+        return self.base[name] if condition is None else condition
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self.base)
+
+    def __len__(self) -> int:
+        return len(self.base)
+
+    def __contains__(self, name: object) -> bool:
+        return name in self.base
+
+
+# evolved Conditions kept per (pins, hard pins); past this many the memo is
+# emptied, bounding its memory to a few tens of MB on any template
+_EVOLVED_MAX = 65536
+
+
 @dataclass(frozen=True)
 class Conditions:
-    conditions: dict[str, Condition] = field(init=True, default_factory=dict)
+    conditions: Mapping[str, Condition] = field(init=True, default_factory=dict)
     # The template's condition definitions and parameter constraints.
     _base_cnf: EncodedCNF = field(init=True, default_factory=EncodedCNF, compare=False)
     # Every pinned condition, including those assumed by scenario enumeration.
@@ -69,6 +102,15 @@ class Conditions:
     ] = field(init=True, default_factory=dict, compare=False, repr=False)
     _with_status: dict[tuple[str, bool | None], Condition] = field(
         init=True, default_factory=dict, compare=False, repr=False
+    )
+    # The template's own statuses (normally none) and the template order of
+    # the condition names; computed once on the template's Conditions and
+    # shared by every Conditions evolved from it.
+    _base_status: dict[str, bool] | None = field(
+        init=True, default=None, compare=False, repr=False
+    )
+    _order: dict[str, int] | None = field(
+        init=True, default=None, compare=False, repr=False
     )
 
     @property
@@ -265,6 +307,28 @@ class Conditions:
             _solver=make_solver(cnf, model),
         )
 
+    def _split(self) -> tuple[dict[str, Condition], dict[str, Condition]]:
+        """The template's conditions and the pins laid over them."""
+        conditions = self.conditions
+        if isinstance(conditions, _Pinned):
+            return conditions.base, conditions.pinned
+        if not isinstance(conditions, dict):
+            conditions = dict(conditions)
+            object.__setattr__(self, "conditions", conditions)
+        return conditions, {}
+
+    def _template_facts(self) -> tuple[dict[str, bool], dict[str, int]]:
+        if self._base_status is None:
+            base, _ = self._split()
+            object.__setattr__(
+                self,
+                "_base_status",
+                {n: c.status for n, c in base.items() if c.status is not None},
+            )
+            object.__setattr__(self, "_order", {n: i for i, n in enumerate(base)})
+        assert self._base_status is not None and self._order is not None
+        return self._base_status, self._order
+
     def evolve(self, status: dict[str, bool], assumed: bool = False) -> "Conditions":
         """Pin one or more conditions to a value.
 
@@ -280,39 +344,48 @@ class Conditions:
         if not status:
             return self
 
+        base, pinned = self._split()
         all_same = True
         for condition, condition_status in status.items():
-            if (
-                condition in self.conditions
-                and self.conditions[condition].status != condition_status
-            ):
-                all_same = False
-                break
+            if condition in base:
+                current = pinned.get(condition) or base[condition]
+                if current.status != condition_status:
+                    all_same = False
+                    break
         if all_same:
             return self
 
-        pins: set[tuple[str, bool]] = set()
+        base_status, order = self._template_facts()
+        new_pinned = dict(pinned)
         hard_pins = set(self._hard_pins)
-        statuses: dict[str, bool | None] = {}
-        for condition, value in self.conditions.items():
-            s = status.get(condition, value.status)
+        for condition, s in status.items():
+            if condition not in base:
+                continue
+            current = new_pinned.get(condition) or base[condition]
             # Condition.evolve refuses to change a status that is set
-            if value.status is not None and s != value.status:
+            if current.status is not None and s != current.status:
                 raise Unsatisfiable(
                     new_status=status,
                     current_status=self.status,
                 )
-            statuses[condition] = s
-            if s is not None and condition in self._condition_symbols:
-                pins.add((condition, s))
-                # Only the conditions being pinned by *this* call, and only
-                # when they are facts (not enumeration hypotheses), join
-                # the hard pins.  Conditions carried over from a prior
-                # evolve are already there if they were facts, and must
-                # stay out if they were assumptions.
-                if not assumed and condition in status:
-                    hard_pins.add((condition, s))
+            with_status = self._with_status.get((condition, s))
+            if with_status is None:
+                with_status = base[condition].evolve(status=s)
+                self._with_status[(condition, s)] = with_status
+            new_pinned[condition] = with_status
+            # Only the conditions being pinned by *this* call, and only
+            # when they are facts (not enumeration hypotheses), join the
+            # hard pins.  Conditions carried over from a prior evolve are
+            # already there if they were facts, and must stay out if they
+            # were assumptions.
+            if not assumed and condition in self._condition_symbols:
+                hard_pins.add((condition, s))
+        if len(new_pinned) > len(pinned):
+            new_pinned = dict(sorted(new_pinned.items(), key=lambda kv: order[kv[0]]))
 
+        symbols = self._condition_symbols
+        pins = {(n, c.status) for n, c in new_pinned.items() if n in symbols}
+        pins |= {(n, v) for n, v in base_status.items() if n in symbols and n not in new_pinned}
         new_pins = frozenset(pins)
         if not self._is_satisfiable(new_pins):
             raise Unsatisfiable(
@@ -325,15 +398,10 @@ class Conditions:
         key = (new_pins, frozenset(hard_pins))
         evolved = self._evolved.get(key)
         if evolved is None:
-            conditions: dict[str, Condition] = {}
-            for condition, s in statuses.items():
-                pinned = self._with_status.get((condition, s))
-                if pinned is None:
-                    pinned = self.conditions[condition].evolve(status=s)
-                    self._with_status[(condition, s)] = pinned
-                conditions[condition] = pinned
+            if len(self._evolved) >= _EVOLVED_MAX:
+                self._evolved.clear()
             evolved = cls(
-                conditions=conditions,
+                conditions=_Pinned(base, new_pinned),
                 _base_cnf=self._base_cnf,
                 _pins=new_pins,
                 _hard_pins=key[1],
@@ -341,6 +409,8 @@ class Conditions:
                 _solver=self._solver,
                 _evolved=self._evolved,
                 _with_status=self._with_status,
+                _base_status=base_status,
+                _order=order,
             )
             self._evolved[key] = evolved
         return evolved
@@ -393,9 +463,14 @@ class Conditions:
 
     @property
     def status(self) -> dict[str, bool]:
-        obj = {}
-        for name, c in self.conditions.items():
-            if c.status is not None:
-                obj[name] = c.status
-
+        """Every condition with a status, in template order."""
+        conditions = self.conditions
+        if not isinstance(conditions, _Pinned):
+            return {n: c.status for n, c in conditions.items() if c.status is not None}
+        base_status, order = self._template_facts()
+        obj = {n: c.status for n, c in conditions.pinned.items() if c.status is not None}
+        if base_status:
+            for n, v in base_status.items():
+                obj.setdefault(n, v)
+            obj = dict(sorted(obj.items(), key=lambda kv: order[kv[0]]))
         return obj
