@@ -704,7 +704,10 @@ class PointSolver:
                 ref, literal = r[1], l[1]
             else:
                 continue
-            if literal not in self._cand[ref] or vals.setdefault(ref, literal) != literal:
+            if (
+                literal not in self._cand[ref]
+                or vals.setdefault(ref, literal) != literal
+            ):
                 return False
         deps = [self._item_deps(n) for n, _ in items]
         refs = sorted({r for d in deps for r in d if r not in vals}, key=repr)

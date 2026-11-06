@@ -186,13 +186,9 @@ class Conditions:
                     # Fn::Equals (P == Q) is not exclusive with P == "x" (P
                     # and Q can both be "x") nor with P == R, so it joins no
                     # group.  The context engine groups the same way.
-                    if isinstance(c_equal.left, str) or isinstance(
-                        c_equal.right, str
-                    ):
+                    if isinstance(c_equal.left, str) or isinstance(c_equal.right, str):
                         for param in c_equal.parameters:
-                            by_parameter.setdefault(param.hash, []).append(
-                                c_equal.hash
-                            )
+                            by_parameter.setdefault(param.hash, []).append(c_equal.hash)
                 equals[c_equal.hash] = c_equal
 
         for rule in self._rules:

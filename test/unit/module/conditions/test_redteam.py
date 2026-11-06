@@ -179,7 +179,9 @@ class TestPointBudget(TestCase):
         (component,) = solver._components
         asked = 0
         while component.route == "pp" and asked < 8:
-            self.assertFalse(self._ask(cfn, [(f"H{asked}", True), (f"E{asked}", False)]))
+            self.assertFalse(
+                self._ask(cfn, [(f"H{asked}", True), (f"E{asked}", False)])
+            )
             asked += 1
         self.assertGreater(component.searched, 3000)
         self.assertLess(asked, 8)
@@ -401,7 +403,9 @@ def cond_chain_narrow(n, k=8):
     conds = {"C0": _eq(_ref("P0"), "a")}
     for i in range(1, n):
         if i % 2:
-            conds[f"C{i}"] = {"Fn::And": [_cond(f"C{i-1}"), _eq(_ref(f"P{i % k}"), "a")]}
+            conds[f"C{i}"] = {
+                "Fn::And": [_cond(f"C{i-1}"), _eq(_ref(f"P{i % k}"), "a")]
+            }
         else:
             conds[f"C{i}"] = {"Fn::Or": [_cond(f"C{i-1}"), _eq(_ref(f"P{i % k}"), "b")]}
     return {

@@ -385,7 +385,11 @@ class Conditions:
 
         symbols = self._condition_symbols
         pins = {(n, c.status) for n, c in new_pinned.items() if n in symbols}
-        pins |= {(n, v) for n, v in base_status.items() if n in symbols and n not in new_pinned}
+        pins |= {
+            (n, v)
+            for n, v in base_status.items()
+            if n in symbols and n not in new_pinned
+        }
         new_pins = frozenset(pins)
         if not self._is_satisfiable(new_pins):
             raise Unsatisfiable(
@@ -468,7 +472,9 @@ class Conditions:
         if not isinstance(conditions, _Pinned):
             return {n: c.status for n, c in conditions.items() if c.status is not None}
         base_status, order = self._template_facts()
-        obj = {n: c.status for n, c in conditions.pinned.items() if c.status is not None}
+        obj = {
+            n: c.status for n, c in conditions.pinned.items() if c.status is not None
+        }
         if base_status:
             for n, v in base_status.items():
                 obj.setdefault(n, v)
