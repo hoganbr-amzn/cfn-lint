@@ -11,7 +11,7 @@ import pytest
 
 from cfnlint.api import ManualArgs, lint
 from cfnlint.conditions._boolean import Not, Symbol
-from cfnlint.conditions._solver import PinSolver
+from cfnlint.conditions._points import PointSolver
 from cfnlint.context import create_context_for_template
 from cfnlint.context.conditions._condition import Condition
 from cfnlint.context.conditions._conditions import Conditions, _Pinned
@@ -559,24 +559,25 @@ def test_or_of_and_pairs_does_not_explode():
 
 
 class _SolveCounter:
-    """Counts the sets of pins the solver actually solves."""
+    """Counts the questions the engine's solver actually solves: a set of
+    pins on one component of the point solver, or one on the SAT solver."""
 
     def __init__(self):
-        self._pin = patch.object(
-            PinSolver, "_solve", autospec=True, side_effect=PinSolver._solve
+        self._point = patch.object(
+            PointSolver, "_solve", autospec=True, side_effect=PointSolver._solve
         )
 
     def __enter__(self):
-        self._pin_mock = self._pin.__enter__()
+        self._point_mock = self._point.__enter__()
         return self
 
     def __exit__(self, *exc):
-        self._pin.__exit__(*exc)
+        self._point.__exit__(*exc)
         return False
 
     @property
     def call_count(self):
-        return self._pin_mock.call_count
+        return self._point_mock.call_count
 
 
 def test_each_set_of_pins_is_solved_once():
@@ -590,7 +591,7 @@ def test_each_set_of_pins_is_solved_once():
     with _SolveCounter() as solver:
         first = base.evolve({"IsUsEast1": True})
         # The first question also checks, once, that the template's clauses
-        # are satisfiable on their own.
+        # are satisfiable on their own (one solve per connected component).
         calls = solver.call_count
         base.evolve({"IsUsEast1": True})
         base.evolve({"IsUsEast1": True}, assumed=True)
@@ -813,6 +814,59 @@ def test_static_equals_is_a_constant(equals, always):
     assert cfn.conditions.is_always_true("Static") is always
 
 
+@pytest.mark.parametrize(
+    "operand,always",
+    [
+        ({"Fn::FindInMap": ["Envs", "prod", "Bucket"]}, True),
+        ({"Fn::Select": ["1", ["dev-bucket", "prod-bucket"]]}, True),
+        ({"Fn::Join": ["-", ["prod", "bucket"]]}, True),
+        # a non-ASCII digit is not an index, so the operand stays a reference
+        ({"Fn::Select": ["\u0661", ["dev-bucket", "prod-bucket"]]}, None),
+        ({"Fn::FindInMap": ["Envs", {"Ref": "Env"}, "Bucket"]}, None),
+    ],
+)
+def test_folded_operands_decide_an_equals(operand, always):
+    """An Fn::Equals whose operand folds to a literal (Fn::Select,
+    Fn::FindInMap or Fn::Join over literals) has one value in both engines,
+    and W1028 reports the Fn::If branch it makes unreachable."""
+    template = {
+        "AWSTemplateFormatVersion": "2010-09-09",
+        "Parameters": {"Env": {"Type": "String"}},
+        "Mappings": {"Envs": {"prod": {"Bucket": "prod-bucket"}}},
+        "Conditions": {"IsProd": {"Fn::Equals": [operand, "prod-bucket"]}},
+        "Resources": {
+            "Bucket": {
+                "Type": "AWS::S3::Bucket",
+                "Properties": {
+                    "BucketName": {"Fn::If": ["IsProd", "prod-bucket", "dev-bucket"]}
+                },
+            }
+        },
+    }
+    cfn = Template("", template)
+    conditions = create_context_for_template(cfn).conditions
+    matches = lint(json.dumps(template), config=ManualArgs(regions=["us-east-1"]))
+    unreachable = [m for m in matches if m.rule.id == "W1028"]
+    if always is None:
+        assert conditions.is_reachable("IsProd", True)
+        assert conditions.is_reachable("IsProd", False)
+        assert cfn.conditions.is_always_true("IsProd") is False
+        assert unreachable == []
+    else:
+        assert conditions.is_reachable("IsProd", always)
+        assert not conditions.is_reachable("IsProd", not always)
+        assert cfn.conditions.is_always_true("IsProd") is always
+        assert len(unreachable) == 1
+        assert unreachable[0].path == [
+            "Resources",
+            "Bucket",
+            "Properties",
+            "BucketName",
+            "Fn::If",
+            2,
+        ]
+
+
 def test_rules_restrict_conditions():
     """A Rules assertion restricts parameter values for context checks, as it
     does in the template-level engine."""
@@ -860,17 +914,13 @@ def test_rules_restrict_conditions():
 
 
 @pytest.mark.parametrize(
-    "assertions",
+    "assertion",
     [
-        # Env would have to be prod and dev at once
-        [
-            {"Fn::Equals": [{"Ref": "Env"}, "prod"]},
-            {"Fn::Equals": [{"Ref": "Env"}, "dev"]},
-        ],
-        [{"Fn::Equals": ["x", "y"]}],  # false whatever the parameters
+        {"Fn::Equals": [{"Ref": "Env"}, "production"]},  # not an AllowedValue
+        {"Fn::Equals": ["x", "y"]},  # false whatever the parameters
     ],
 )
-def test_rules_that_can_never_hold_are_left_out(assertions):
+def test_rules_that_can_never_hold_are_left_out(assertion):
     """When no parameter values pass the Rules, the context engine answers
     about the conditions alone, as for a template without Rules: otherwise
     every value of every condition is unreachable, including conditions on
@@ -882,7 +932,7 @@ def test_rules_that_can_never_hold_are_left_out(assertions):
             "Env": {"Type": "String", "AllowedValues": ["prod", "dev"]},
             "Size": {"Type": "String"},
         },
-        "Rules": {"Never": {"Assertions": [{"Assert": a} for a in assertions]}},
+        "Rules": {"Typo": {"Assertions": [{"Assert": assertion}]}},
         "Conditions": {
             "IsProd": {"Fn::Equals": [{"Ref": "Env"}, "prod"]},
             "IsBig": {"Fn::Equals": [{"Ref": "Size"}, "big"]},

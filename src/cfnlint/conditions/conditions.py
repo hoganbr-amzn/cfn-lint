@@ -23,8 +23,8 @@ from cfnlint.conditions._condition import ConditionMemo, ConditionNamed
 from cfnlint.conditions._equals import Equal, EqualParameter
 from cfnlint.conditions._errors import UnknownSatisfisfaction
 from cfnlint.conditions._model import PointModel
+from cfnlint.conditions._points import make_solver
 from cfnlint.conditions._rule import Rule
-from cfnlint.conditions._solver import PinSolver
 from cfnlint.conditions._utils import cfn_string, get_hash
 from cfnlint.helpers import get_partition
 
@@ -50,10 +50,10 @@ class Conditions:
         self._init_conditions(cfn=cfn)
         self._init_parameters(cfn=cfn)
         self._init_rules(cfn=cfn)
-        self._cnf, self._solver_params, self._model = self._build_cnf_and_model(
+        self._cnf, self._solver_params, model = self._build_cnf_and_model(
             list(self._conditions.keys())
         )
-        self._solver = PinSolver(self._cnf)
+        self._solver = make_solver(self._cnf, model)
 
     def _init_conditions(self, cfn):
         conditions = cfn.template.get("Conditions")

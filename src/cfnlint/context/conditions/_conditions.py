@@ -23,7 +23,7 @@ from cfnlint.conditions._boolean import (
     add_equivalence,
 )
 from cfnlint.conditions._model import PointModel
-from cfnlint.conditions._solver import PinSolver
+from cfnlint.conditions._points import PointSolver, make_solver
 from cfnlint.conditions._utils import cfn_string, get_hash
 from cfnlint.context.conditions._condition import Condition, ConditionMemo
 from cfnlint.context.conditions._equals import Equal
@@ -93,7 +93,7 @@ class Conditions:
     )
     # Answers whether a set of pins is satisfiable, once per set.  It holds
     # _base_cnf, so pass it on only together with it (evolve does).
-    _solver: PinSolver | None = field(
+    _solver: PointSolver | None = field(
         init=True, default=None, compare=False, repr=False
     )
     _max_scenarios: int = field(init=False, default=128)
@@ -128,7 +128,7 @@ class Conditions:
 
     def __post_init__(self) -> None:
         if self._solver is None:
-            object.__setattr__(self, "_solver", PinSolver(self._base_cnf))
+            object.__setattr__(self, "_solver", make_solver(self._base_cnf))
 
     @property
     def cnf(self) -> ClauseSet:
@@ -295,7 +295,7 @@ class Conditions:
             model.add_domain(get_hash({"Ref": p_k}), p_v.allowed_values)
         model.constraints.extend(rule_exprs)
 
-        solver = PinSolver(cnf)
+        solver = make_solver(cnf, model)
         if rule_exprs and not solver.satisfiable(()):
             # No parameter values pass the Rules, so with them every
             # question is unsatisfiable and every branch unreachable.

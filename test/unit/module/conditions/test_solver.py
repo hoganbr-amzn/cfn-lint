@@ -9,14 +9,17 @@ from unittest import TestCase
 
 from cfnlint.conditions._boolean import ClauseSet, Symbol
 from cfnlint.conditions._cdcl import CdclSolver
-from cfnlint.conditions._solver import PinSolver, alternate_ends
+from cfnlint.conditions._model import PointModel
+from cfnlint.conditions._points import PointSolver
+from cfnlint.conditions._solver import alternate_ends
 
 
 def _solver(clauses, nvars):
-    """A PinSolver over ``clauses`` with Symbols x0..x(nvars-1)."""
+    """A PointSolver with no model (every question on the CNF) over
+    ``clauses`` with Symbols x0..x(nvars-1)."""
     syms = [Symbol(f"x{i}") for i in range(nvars)]
     cnf = ClauseSet([set(c) for c in clauses], {s: i + 1 for i, s in enumerate(syms)})
-    return PinSolver(cnf), syms
+    return PointSolver(cnf, PointModel()), syms
 
 
 def _true_first(models):
@@ -30,7 +33,7 @@ def _holds(clauses, assignment):
     )
 
 
-class TestPinSolver(TestCase):
+class TestCnfQuestions(TestCase):
     def test_models_agree_with_brute_force(self):
         # three components: {1,2,3}, {4,5}, {6}; 6 is forced true
         clauses = [{1, 2}, {-2, 3}, {-1, -3}, {4, 5}, {-4, -5}, {6}]

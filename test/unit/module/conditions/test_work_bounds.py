@@ -2,27 +2,22 @@
 Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 SPDX-License-Identifier: MIT-0
 
-Ceilings on the work the condition engines do per template shape, so that a
-change that makes a shape exponential or quadratic again fails here rather
-than in a user's lint.
+Ceilings on the work the condition engines do per template shape, at two
+sizes each, so that a change that makes a shape quadratic again fails here
+rather than in a user's lint.
 """
 
 import math
+from test.unit.module.conditions.test_points import (
+    _cond,
+    _eq,
+    _ref,
+    cond_chain_narrow,
+    wide_eval,
+)
 from unittest import TestCase
 
 from cfnlint.template import Template
-
-
-def _eq(left, right):
-    return {"Fn::Equals": [left, right]}
-
-
-def _ref(name):
-    return {"Ref": name}
-
-
-def _cond(name):
-    return {"Condition": name}
 
 
 def many_equals(n):
@@ -83,3 +78,48 @@ class TestWorkBounds(TestCase):
                 self.assertLessEqual(
                     len(cfn.context.conditions._base_cnf.data), ceiling
                 )
+
+    def test_wide_or_costs_its_width_per_question(self):
+        """A question about an Or of n conditions over one parameter costs a
+        number of node evaluations proportional to n."""
+        for n in (64, 256):
+            with self.subTest(n=n):
+                cfn = Template("", wide_eval(n), ["us-east-1"])
+                solver = cfn.conditions._solver
+                for i in range(n):
+                    cfn.conditions.check_implies({f"Is{i}": True}, "Any")
+                    list(cfn.conditions.build_scenarios({f"Is{i}": None, "Any": None}))
+                self.assertLessEqual(solver._work, 4 * n * n)
+
+    def test_condition_chain_costs_its_length(self):
+        """Questions about a chain of n conditions referencing each other
+        cost a number of node evaluations proportional to n."""
+        for n in (200, 1000):
+            with self.subTest(n=n):
+                cfn = Template("", cond_chain_narrow(n), ["us-east-1"])
+                solver = cfn.conditions._solver
+                last = f"C{n - 1}"
+                cfn.conditions.check_implies({last: True}, "C0")
+                list(cfn.conditions.build_scenarios({last: {True}, "C0": None}))
+                self.assertLessEqual(solver._work, 1500 * n)
+
+    def test_free_parameters_are_one_component_each(self):
+        """Conditions on unrelated parameters are solved apart: a question
+        about one touches one component, however many there are."""
+        n = 50
+        cfn = Template(
+            "",
+            {
+                "Parameters": {f"P{i}": {"Type": "String"} for i in range(n)},
+                "Conditions": {
+                    **{f"E{i}": _eq(_ref(f"P{i}"), "a") for i in range(n)},
+                    "Both": {"Fn::And": [_cond("E0"), _cond("E1")]},
+                },
+                "Resources": {},
+            },
+            ["us-east-1"],
+        )
+        solver = cfn.conditions._solver
+        self.assertTrue(cfn.conditions.check_implies({"Both": True}, "E0"))
+        self.assertEqual(len(solver._components), n - 1)
+        self.assertLess(solver._work, 20 * n)
