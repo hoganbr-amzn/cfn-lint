@@ -83,3 +83,24 @@ class TestWorkBounds(TestCase):
                 self.assertLessEqual(
                     len(cfn.context.conditions._base_cnf.data), ceiling
                 )
+
+    def test_free_parameters_are_one_component_each(self):
+        """Conditions on unrelated parameters are solved apart: a question
+        about one touches one component, however many there are."""
+        n = 50
+        cfn = Template(
+            "",
+            {
+                "Parameters": {f"P{i}": {"Type": "String"} for i in range(n)},
+                "Conditions": {
+                    **{f"E{i}": _eq(_ref(f"P{i}"), "a") for i in range(n)},
+                    "Both": {"Fn::And": [_cond("E0"), _cond("E1")]},
+                },
+                "Resources": {},
+            },
+            ["us-east-1"],
+        )
+        self.assertTrue(cfn.conditions.check_implies({"Both": True}, "E0"))
+        self.assertEqual(len(cfn.conditions._solver._components), n - 1)
+        self.assertTrue(cfn.context.conditions.is_reachable("Both", True))
+        self.assertEqual(len(cfn.context.conditions._solver._components), n - 1)

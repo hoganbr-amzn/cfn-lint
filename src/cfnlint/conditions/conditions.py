@@ -9,17 +9,17 @@ import itertools
 import logging
 import traceback
 from functools import lru_cache
-from typing import Any, Iterator, Set, Tuple
+from typing import Any, Iterable, Iterator, Set, Tuple
 
-from sympy import And, Implies, Not, Symbol
+from sympy import And, Not, Symbol
 from sympy.assumptions.cnf import EncodedCNF
 from sympy.logic.boolalg import BooleanFalse, BooleanTrue
-from sympy.logic.inference import satisfiable
 
 from cfnlint.conditions._condition import ConditionMemo, ConditionNamed
 from cfnlint.conditions._equals import Equal, EqualParameter
 from cfnlint.conditions._errors import UnknownSatisfisfaction
 from cfnlint.conditions._rule import Rule
+from cfnlint.conditions._solver import PinSolver
 from cfnlint.conditions._utils import (
     add_at_most_one,
     add_constraint,
@@ -50,6 +50,7 @@ class Conditions:
         self._init_parameters(cfn=cfn)
         self._init_rules(cfn=cfn)
         self._cnf, self._solver_params = self._build_cnf(list(self._conditions.keys()))
+        self._solver = PinSolver(self._cnf)
 
     def _init_conditions(self, cfn):
         conditions = cfn.template.get("Conditions")
@@ -119,6 +120,49 @@ class Conditions:
     def get(self, name: str, default: Any = None) -> ConditionNamed:
         """Return the conditions"""
         return self._conditions.get(name, default)
+
+    @staticmethod
+    def _solver_pins(
+        pins: Iterable[tuple[Any, bool]],
+    ) -> list[tuple[Symbol, bool]] | None:
+        """The pins the solver is asked about: pairs of a solver variable (a
+        condition's Symbol from ``_solver_params`` or an Fn::Equals Symbol)
+        and the value it takes.  A static Fn::Equals is a constant rather
+        than a Symbol: pinning it to its value says nothing and is dropped,
+        pinning it to the other value is impossible, so None is returned."""
+        symbols = []
+        for literal, value in pins:
+            if isinstance(literal, (BooleanTrue, BooleanFalse)):
+                if bool(literal) != value:
+                    return None
+                continue
+            symbols.append((literal, value))
+        return symbols
+
+    def _satisfiable(self, pins: Iterable[tuple[Any, bool]]) -> bool:
+        """Whether the template's conditions allow ``pins``."""
+        symbols = self._solver_pins(pins)
+        if symbols is None:
+            return False
+        return self._solver.satisfiable(symbols)
+
+    def _region_pins(
+        self, equals: Iterable[Equal], region: str
+    ) -> list[tuple[Any, bool]]:
+        """A region fixes every Fn::Equals on AWS::Region, and through the
+        partition every one on AWS::Partition, among ``equals``."""
+        partition = get_partition(region)
+        pins: list[tuple[Any, bool]] = []
+        for eql in equals:
+            is_region, equal_region = eql.is_region
+            if is_region:
+                pins.append((self._solver_params[eql.hash], equal_region == region))
+            is_partition, equal_partition = eql.is_partition
+            if is_partition:
+                pins.append(
+                    (self._solver_params[eql.hash], equal_partition == partition)
+                )
+        return pins
 
     def _build_cnf(
         self, condition_names: list[str]
@@ -254,93 +298,57 @@ class Conditions:
         if len(conditions) == 0:
             return
 
-        c_cnf = self._cnf.copy()
+        fixed_pins: list[tuple[Any, bool]] = []
         condition_names = []
         conditions_set = {}
         for condition_name, values in conditions.items():
             if condition_name in self._conditions:
                 if values == {True}:
-                    c_cnf.add_prop(
-                        self._conditions[condition_name].build_true_cnf(
-                            self._solver_params
-                        )
-                    )
+                    fixed_pins.append((self._solver_params[condition_name], True))
                     conditions_set[condition_name] = True
                     continue
                 if values == {False}:
-                    c_cnf.add_prop(
-                        self._conditions[condition_name].build_false_cnf(
-                            self._solver_params
-                        )
-                    )
+                    fixed_pins.append((self._solver_params[condition_name], False))
                     conditions_set[condition_name] = False
                     continue
             condition_names.append(condition_name)
         # Callers collect names in sets; sort them so the scenarios tried
         # before the cap, and their order, do not depend on the hash seed.
         condition_names.sort(key=str)
-
-        try:
-            # build a large matric of True/False options
-            # based on the provided conditions
-            scenarios_attempted = 0
-            if region:
-                # each condition takes the values it can have in the region
-                products = itertools.product(
-                    *[
-                        self.build_scenerios_on_region(name, region)
-                        for name in condition_names
-                    ]
-                )
-            else:
-                products = itertools.product([True, False], repeat=len(condition_names))  # type: ignore
-
-            for p in products:
-                cnf = c_cnf.copy()
-                params = dict(zip(condition_names, p))
-                for condition_name, opt in params.items():
-                    if opt:
-                        cnf.add_prop(
-                            self._conditions[condition_name].build_true_cnf(
-                                self._solver_params
-                            )
-                        )
-                    else:
-                        cnf.add_prop(
-                            self._conditions[condition_name].build_false_cnf(
-                                self._solver_params
-                            )
-                        )
-
-                # if the scenario can be satisfied then return it
-                if satisfiable(cnf):
-                    yield {**params, **conditions_set}
-
-                scenarios_attempted += 1
-                # On occassions people will use a lot of non-related conditions
-                # this is fail safe to limit the maximum number of responses
-                if scenarios_attempted >= self._max_scenarios:
-                    return
-        except KeyError:
-            # KeyError is because the listed condition doesn't exist because of bad
-            #  formatting or just the wrong condition name
+        # A condition the template does not define (a wrong name, or one
+        # that failed to build) has no scenarios.
+        if any(name not in self._conditions for name in condition_names):
             return
 
-    def _build_cfn_implies(self, scenarios) -> And:
-        conditions = []
-        for condition_name, opt in scenarios.items():
-            if opt:
-                conditions.append(
-                    self._conditions[condition_name].build_true_cnf(self._solver_params)
-                )
-            else:
-                conditions.append(
-                    self._conditions[condition_name].build_false_cnf(
-                        self._solver_params
-                    )
-                )
+        # build a large matric of True/False options
+        # based on the provided conditions
+        scenarios_attempted = 0
+        if region:
+            # each condition takes the values it can have in the region
+            products = itertools.product(
+                *[
+                    self.build_scenerios_on_region(name, region)
+                    for name in condition_names
+                ]
+            )
+        else:
+            products = itertools.product([True, False], repeat=len(condition_names))  # type: ignore
 
-        return And(*conditions)
+        for p in products:
+            pins = list(fixed_pins)
+            params = dict(zip(condition_names, p))
+            for condition_name, opt in params.items():
+                pins.append((self._solver_params[condition_name], bool(opt)))
+
+            # if the scenario can be satisfied then return it
+            if self._satisfiable(pins):
+                yield {**params, **conditions_set}
+
+            scenarios_attempted += 1
+            # On occassions people will use a lot of non-related conditions
+            # this is fail safe to limit the maximum number of responses
+            if scenarios_attempted >= self._max_scenarios:
+                return
 
     def check_implies(self, scenarios: dict[str, bool], implies: str) -> bool:
         """Based on a bunch of scenario conditions and their Truth/False value
@@ -355,29 +363,24 @@ class Conditions:
         Returns:
             bool: if the implied condition will be True if the scenario is True
         """
-        try:
-            cnf = self._cnf.copy()
-            # if the implies condition has to be false in the scenarios we
-            # know it can never be true
-            if not scenarios.get(implies, True):
-                return False
+        # if the implies condition has to be false in the scenarios we
+        # know it can never be true
+        if not scenarios.get(implies, True):
+            return False
 
-            and_condition = self._build_cfn_implies(scenarios)
-            cnf.add_prop(and_condition)
-            implies_condition = self._conditions[implies].build_true_cnf(
-                self._solver_params
-            )
-            cnf.add_prop(Not(Implies(and_condition, implies_condition)))
-
-            results = satisfiable(cnf)
-            if results:
-                return False
-
+        # A condition the template does not define (a wrong name, or one
+        # that failed to build) implies nothing either way.
+        if implies not in self._conditions:
             return True
-        except KeyError:
-            # KeyError is because the listed condition doesn't exist because of bad
-            #  formatting or just the wrong condition name
-            return True
+        # The scenario implies the condition when the scenario together
+        # with the condition being false cannot be satisfied.
+        pins: list[tuple[Any, bool]] = []
+        for condition_name, opt in scenarios.items():
+            if condition_name not in self._conditions:
+                return True
+            pins.append((self._solver_params[condition_name], bool(opt)))
+        pins.append((self._solver_params[implies], False))
+        return not self._satisfiable(pins)
 
     @lru_cache
     def is_always_true(self, condition_name: str) -> bool:
@@ -406,53 +409,25 @@ class Conditions:
             list[bool]: Returns True, False, or True and False depending on if the
                condition could be True, False or both based on the region parameter
         """
-        cnf_region = self._cnf.copy()
-        found_pseudo = False
-
         # validate the condition name exists
         # return True/False if it doesn't
         if condition_name not in self._conditions:
             return [True, False]
 
-        # A region fixes the partition too, so an Equals against
-        # Ref AWS::Partition is decided the same way as one against Ref AWS::Region
-        partition = get_partition(region)
-        for eql in self._conditions[condition_name].equals:
-            is_region, equal_region = eql.is_region
-            if is_region:
-                found_pseudo = True
-                if equal_region == region:
-                    cnf_region.add_prop(And(self._solver_params[eql.hash]))
-                else:
-                    cnf_region.add_prop(Not(self._solver_params[eql.hash]))
-            is_partition, equal_partition = eql.is_partition
-            if is_partition:
-                found_pseudo = True
-                if equal_partition == partition:
-                    cnf_region.add_prop(And(self._solver_params[eql.hash]))
-                else:
-                    cnf_region.add_prop(Not(self._solver_params[eql.hash]))
+        region_pins = self._region_pins(self._conditions[condition_name].equals, region)
 
         # The condition doesn't use AWS::Region or AWS::Partition so it can be
         # True or False
         # Note: It is possible its a hard coded condition but
         # for now we will return True and False
-        if not found_pseudo:
+        if not region_pins:
             return [True, False]
 
         results = []
-        cnf_test = cnf_region.copy()
-        cnf_test.add_prop(
-            self._conditions[condition_name].build_true_cnf(self._solver_params)
-        )
-        if satisfiable(cnf_test):
+        condition = self._solver_params[condition_name]
+        if self._satisfiable(region_pins + [(condition, True)]):
             results.append(True)
-
-        cnf_test = cnf_region.copy()
-        cnf_test.add_prop(
-            self._conditions[condition_name].build_false_cnf(self._solver_params)
-        )
-        if satisfiable(cnf_test):
+        if self._satisfiable(region_pins + [(condition, False)]):
             results.append(False)
 
         return results
@@ -475,14 +450,11 @@ class Conditions:
         """
         if not conditions:
             if self._rules:
-                satisfied = satisfiable(self._cnf, all_models=False)
-                if satisfied is False:
-                    return satisfied
-                return True
+                return self._satisfiable([])
             else:
                 return True
 
-        cnf = self._cnf.copy()
+        pins: list[tuple[Any, bool]] = []
         at_least_one_param_found = False
 
         for condition_name, opt in conditions.items():
@@ -509,34 +481,18 @@ class Conditions:
                     continue
 
                 at_least_one_param_found = True
-                if c_equals.test(found_params):
-                    cnf.add_prop(Symbol(c_equals.hash))
-                else:
-                    cnf.add_prop(Not(Symbol(c_equals.hash)))
-
-                if opt:
-                    cnf.add_prop(
-                        self._conditions[condition_name].build_true_cnf(
-                            self._solver_params
-                        )
-                    )
-                else:
-                    cnf.add_prop(
-                        self._conditions[condition_name].build_false_cnf(
-                            self._solver_params
-                        )
-                    )
+                # A static Fn::Equals was pinned through a fresh
+                # Symbol(hash) that shares no clause with the template, so
+                # the pin had no effect; keep that by pinning only Symbols.
+                equal = self._solver_params[c_equals.hash]
+                if isinstance(equal, Symbol):
+                    pins.append((equal, c_equals.test(found_params)))
+                pins.append((self._solver_params[condition_name], bool(opt)))
 
         if at_least_one_param_found is False:
             if self._rules:
-                satisfied = satisfiable(self._cnf, all_models=False)
-                if satisfied is False:
-                    return satisfied
-                return True
+                return self._satisfiable([])
             else:
                 return True
 
-        satisfied = satisfiable(cnf, all_models=False)
-        if satisfied is False:
-            return satisfied
-        return True
+        return self._satisfiable(pins)
