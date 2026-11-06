@@ -22,6 +22,7 @@ from cfnlint.conditions._boolean import (
     add_constraint,
     add_equivalence,
 )
+from cfnlint.conditions._model import PointModel
 from cfnlint.conditions._solver import PinSolver
 from cfnlint.conditions._utils import cfn_string, get_hash
 from cfnlint.context.conditions._condition import Condition, ConditionMemo
@@ -158,6 +159,7 @@ class Conditions:
         conditions: Any,
         rules: dict[str, dict],
         parameters: dict[str, "Parameter"],
+        mappings: Any = None,
     ) -> "Conditions":
         obj: dict[str, Condition] = {}
         if not isinstance(conditions, dict):
@@ -275,13 +277,31 @@ class Conditions:
         for expr in rule_exprs:
             add_constraint(cnf, expr)
 
+        model = PointModel()
+        for name, cond in obj.items():
+            model.defs[condition_symbols[name]] = cond.cnf
+        for i in distinct_equals.values():
+            if i.left.instance is None or i.right.instance is None:
+                continue  # a missing operand: the model cannot evaluate it
+            # an EqualParameter holds a literal as the string CloudFormation
+            # compares (cfn_string)
+            model.add_equal(
+                i.cnf,
+                (i.left.instance, i.left.hash),
+                (i.right.instance, i.right.hash),
+                mappings,
+            )
+        for p_k, p_v in parameters.items():
+            model.add_domain(get_hash({"Ref": p_k}), p_v.allowed_values)
+        model.constraints.extend(rule_exprs)
+
         solver = PinSolver(cnf)
         if rule_exprs and not solver.satisfiable(()):
             # No parameter values pass the Rules, so with them every
             # question is unsatisfiable and every branch unreachable.
             # Answer about the conditions alone instead.
             LOGGER.debug("Rules can never hold; conditions are evaluated without them")
-            return cls.create_from_instance(conditions, {}, parameters)
+            return cls.create_from_instance(conditions, {}, parameters, mappings)
 
         return cls(
             conditions=obj,

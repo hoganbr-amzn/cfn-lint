@@ -22,6 +22,7 @@ from cfnlint.conditions._boolean import (
 from cfnlint.conditions._condition import ConditionMemo, ConditionNamed
 from cfnlint.conditions._equals import Equal, EqualParameter
 from cfnlint.conditions._errors import UnknownSatisfisfaction
+from cfnlint.conditions._model import PointModel
 from cfnlint.conditions._rule import Rule
 from cfnlint.conditions._solver import PinSolver
 from cfnlint.conditions._utils import cfn_string, get_hash
@@ -42,12 +43,16 @@ class Conditions:
     def __init__(self, cfn) -> None:
         self._conditions: dict[str, ConditionNamed] = {}
         self._parameters: dict[str, list[str]] = {}
+        self._allowed_values: dict[str, list[Any]] = {}  # parameter hash -> list
         self._rules: list[Rule] = []
         self._memo = ConditionMemo()
+        self._mappings = cfn.template.get("Mappings")
         self._init_conditions(cfn=cfn)
         self._init_parameters(cfn=cfn)
         self._init_rules(cfn=cfn)
-        self._cnf, self._solver_params = self._build_cnf(list(self._conditions.keys()))
+        self._cnf, self._solver_params, self._model = self._build_cnf_and_model(
+            list(self._conditions.keys())
+        )
         self._solver = PinSolver(self._cnf)
 
     def _init_conditions(self, cfn):
@@ -91,6 +96,7 @@ class Conditions:
                     self._parameters[param_hash].append(
                         get_hash(str(cfn_string(allowed_value)))
                     )
+            self._allowed_values[param_hash] = allowed_values
 
     def _init_rules(self, cfn: Any) -> None:
         rules = cfn.template.get("Rules")
@@ -162,10 +168,16 @@ class Conditions:
                 )
         return pins
 
-    def _build_cnf(
+    def _build_cnf_and_model(
         self, condition_names: list[str]
-    ) -> Tuple[ClauseSet, dict[str, Any]]:
+    ) -> Tuple[ClauseSet, dict[str, Any], PointModel]:
+        """The clauses of the conditions, Rules and AllowedValues; the
+        Symbol or constant of every condition name and Fn::Equals hash; and
+        the model of those symbols the point solver searches."""
         cnf = ClauseSet()
+        model = PointModel()
+        for param_hash, allowed in self._allowed_values.items():
+            model.add_domain(param_hash, allowed)
 
         # Fn::Equals hash -> its Symbol, or a constant for a static one
         equal_vars: dict[str, Any] = {}
@@ -181,6 +193,9 @@ class Conditions:
                     continue
 
                 if c_equal.is_static is not None:
+                    # A static Fn::Equals (two equal literals, or Ref P
+                    # against Ref P) has the same value whatever P is, so it
+                    # says nothing about P and joins no exclusion group.
                     if c_equal.is_static:
                         equal_vars[c_equal.hash] = BooleanTrue()
                     else:
@@ -192,7 +207,7 @@ class Conditions:
                     # different literals are exclusive; a Ref-vs-Ref
                     # Fn::Equals (P == Q) is not exclusive with P == "x" (P
                     # and Q can both be "x") nor with P == R, so it joins no
-                    # group.
+                    # group.  The context engine groups the same way.
                     if _has_literal(c_equal):
                         for param in c_equal.parameters:
                             by_parameter.setdefault(param.hash, []).append(c_equal.hash)
@@ -245,12 +260,9 @@ class Conditions:
                     if parts:
                         cnf.add_clause(parts)
 
-        # Create a Symbol per condition name and add implication constraints
-        # so that build_true_cnf/build_false_cnf can use the simple Symbol
-        # instead of the full boolean expression (avoids CNF explosion).
-        # We add condition symbols to equal_vars FIRST so that when
-        # build_cnf is called, nested !Condition references resolve to
-        # the simple Symbol instead of expanding the full expression.
+        # A Symbol per condition name, defined by an equivalence with the
+        # condition's expression, so a nested !Condition reference resolves
+        # to the Symbol instead of expanding the full expression.
         cond_symbols: dict[str, Symbol] = {}
         for condition_name in condition_names:
             cond_symbols[condition_name] = Symbol(f"__cond_{condition_name}")
@@ -266,6 +278,7 @@ class Conditions:
                     build_params[other_name] = other_sym
             cond_expr = self._conditions[condition_name].build_cnf(build_params)
             add_equivalence(cnf, cond_sym, cond_expr)
+            model.defs[cond_sym] = cond_expr
 
         equal_vars.update(cond_symbols)
 
@@ -273,8 +286,22 @@ class Conditions:
             rule_expr = rule.build_cnf(equal_vars)
             if rule_expr is not None:
                 add_constraint(cnf, rule_expr)
+                model.constraints.append(rule_expr)
 
-        return (cnf, equal_vars)
+        def _operand(side: EqualParameter | str) -> tuple[Any, str]:
+            if isinstance(side, str):
+                return side, ""
+            return side._value, side.hash
+
+        for e_hash, e_equal in equals.items():
+            model.add_equal(
+                equal_vars[e_hash],
+                _operand(e_equal.left),
+                _operand(e_equal.right),
+                self._mappings,
+            )
+
+        return (cnf, equal_vars, model)
 
     def build_scenarios(
         self, conditions: dict[str, Set[bool]], region: str | None = None
