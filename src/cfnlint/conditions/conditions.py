@@ -11,6 +11,7 @@ from functools import lru_cache
 from typing import Any, Iterable, Iterator, Set, Tuple
 
 from cfnlint.conditions._boolean import (
+    And,
     BooleanFalse,
     BooleanTrue,
     ClauseSet,
@@ -233,20 +234,19 @@ class Conditions:
                 # means the list is empty and all allowed values are validated
                 # so not all equals can be false
                 if not allowed_value:
-                    prop = None
+                    # one And over every Not(equal) instead of a chain of
+                    # binary Ands, each re-flattening the one before
+                    parts = []
                     for _, equal_1 in equals.items():
                         for param in equal_1.parameters:
                             if allowed_hash == param.hash:
-                                if prop is None:
-                                    prop = Not(equal_vars[equal_1.hash])
-                                else:
-                                    prop = prop & Not(equal_vars[equal_1.hash])
+                                parts.append(Not(equal_vars[equal_1.hash]))
                     # Need to make sure they aren't all False
                     # So Not(Not(Equal1) & Not(Equal2))
                     # When Equal1 False and Equal2 False
                     # Not(True & True) = False allowing this not to happen
-                    if prop is not None:
-                        cnf.add_prop(Not(prop))
+                    if parts:
+                        cnf.add_prop(Not(And(*parts)))
 
         # Create a Symbol per condition name and add implication constraints
         # so that build_true_cnf/build_false_cnf can use the simple Symbol
