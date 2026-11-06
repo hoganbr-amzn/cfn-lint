@@ -16,7 +16,7 @@ between references and literals, including Ref-vs-Ref and Ref-vs-itself.
 
 Engine selection: CFNLINT_COND_ENGINE =
   hybrid  (default) a component whose static point count (after folding
-          static intrinsics) is at most CFNLINT_PP_MAX_POINTS (65,536) is
+          static intrinsics) is at most CFNLINT_PP_MAX_POINTS (1,048,576) is
           answered by points, the rest by incremental SAT; a points question
           over the step budget (CFNLINT_PP_BUDGET) is answered by SAT for
           that component, so every answer is exact for the model.
@@ -57,7 +57,7 @@ if ENGINE not in ("hybrid", "pp", "pyinc", "g", "dual"):
 # largest point product enumerated directly by models(); larger ones are
 # enumerated by satisfiability checks on prefixes
 ENUM_MAX = int(os.environ.get("CFNLINT_PP_ENUM_MAX", "4096"))
-MAX_POINTS = int(os.environ.get("CFNLINT_PP_MAX_POINTS", "65536"))
+MAX_POINTS = int(os.environ.get("CFNLINT_PP_MAX_POINTS", "1048576"))
 STEP_BUDGET = int(os.environ.get("CFNLINT_PP_BUDGET", "200000"))
 MAX_REFS = 400  # recursion depth guard
 
