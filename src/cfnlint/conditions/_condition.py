@@ -17,6 +17,18 @@ from cfnlint.helpers import FUNCTION_CONDITIONS
 _CONDITION = Dict[str, Union[str, Sequence["_CONDITION"]]]
 
 
+class ConditionMemo:
+    """One ConditionNamed per name, shared by every ``Condition: name``
+    reference, so a condition referenced many times is parsed once instead
+    of once per reference (which made the tree exponential in the depth of
+    the reference chain).  A name that is being built when it is referenced
+    again is a cycle and raises, as the unbounded recursion did before."""
+
+    def __init__(self) -> None:
+        self.named: dict[str, ConditionNamed] = {}
+        self.building: set[str] = set()
+
+
 class Condition:
     """The generic class to represent any type of Condition"""
 
@@ -28,6 +40,7 @@ class Condition:
         self,
         condition: _CONDITION,
         all_conditions: dict[str, dict],
+        memo: ConditionMemo | None = None,
     ) -> None:
         if len(condition) == 1:
             for k, v in condition.items():
@@ -37,15 +50,15 @@ class Condition:
                     if k == "Fn::Equals":
                         self._fn_equals = Equal(v)
                     elif k == "Fn::And":
-                        self._condition = ConditionAnd(v, all_conditions)
+                        self._condition = ConditionAnd(v, all_conditions, memo)
                     elif k == "Fn::Or":
-                        self._condition = ConditionOr(v, all_conditions)
+                        self._condition = ConditionOr(v, all_conditions, memo)
                     elif k == "Fn::Not":
-                        self._condition = ConditionNot(v, all_conditions)
+                        self._condition = ConditionNot(v, all_conditions, memo)
                 elif k == "Condition":
                     if not isinstance(v, str):
                         raise ValueError(f"Condition value {v!r} must be a string")
-                    self._condition = ConditionNamed(v, all_conditions)
+                    self._condition = ConditionNamed.named(v, all_conditions, memo)
                 else:
                     raise ValueError(f"Unknown key ({k}) in condition")
         else:
@@ -98,13 +111,16 @@ class ConditionList(Condition):
     """
 
     def __init__(
-        self, conditions: Sequence[_CONDITION], all_conditions: dict[str, dict]
+        self,
+        conditions: Sequence[_CONDITION],
+        all_conditions: dict[str, dict],
+        memo: ConditionMemo | None = None,
     ) -> None:
         super().__init__()
         self._conditions: list[ConditionUnnammed] = []
         self._prefix_path: str = ""
         for condition in conditions:
-            self._conditions.append(ConditionUnnammed(condition, all_conditions))
+            self._conditions.append(ConditionUnnammed(condition, all_conditions, memo))
 
     @property
     def equals(self) -> list[Equal]:
@@ -115,19 +131,25 @@ class ConditionList(Condition):
         Returns:
             list[Equal]: The Equal that are part of the condition
         """
-        equals: list[Equal] = []
+        # One entry per distinct Fn::Equals: a condition referenced from
+        # several places contributes its equals once.
+        equals: dict[str, Equal] = {}
         for condition in self._conditions:
-            equals.extend(condition.equals)
-        return equals
+            for equal in condition.equals:
+                equals.setdefault(equal.hash, equal)
+        return list(equals.values())
 
 
 class ConditionAnd(ConditionList):
     """Represents the logic specific to an And Condition"""
 
     def __init__(
-        self, conditions: Sequence[_CONDITION], all_conditions: dict[str, dict]
+        self,
+        conditions: Sequence[_CONDITION],
+        all_conditions: dict[str, dict],
+        memo: ConditionMemo | None = None,
     ) -> None:
-        super().__init__(conditions, all_conditions)
+        super().__init__(conditions, all_conditions, memo)
         self._prefix_path = "Fn::And"
 
     def build_cnf(self, params: dict[str, Symbol]) -> BooleanFunction:
@@ -153,9 +175,12 @@ class ConditionNot(ConditionList):
     """Represents the logic specific to an Not Condition"""
 
     def __init__(
-        self, conditions: Sequence[_CONDITION], all_conditions: dict[str, dict]
+        self,
+        conditions: Sequence[_CONDITION],
+        all_conditions: dict[str, dict],
+        memo: ConditionMemo | None = None,
     ) -> None:
-        super().__init__(conditions, all_conditions)
+        super().__init__(conditions, all_conditions, memo)
         self._prefix_path = "Fn::Not"
         if len(conditions) != 1:
             raise ValueError("Condition length must be 1")
@@ -179,9 +204,12 @@ class ConditionOr(ConditionList):
     """Represents the logic specific to an Or Condition"""
 
     def __init__(
-        self, conditions: Sequence[_CONDITION], all_conditions: dict[str, dict]
+        self,
+        conditions: Sequence[_CONDITION],
+        all_conditions: dict[str, dict],
+        memo: ConditionMemo | None = None,
     ) -> None:
-        super().__init__(conditions, all_conditions)
+        super().__init__(conditions, all_conditions, memo)
         self._prefix_path = "Fn::Or"
 
     def build_cnf(self, params: dict[str, Symbol]) -> BooleanFunction:
@@ -205,10 +233,15 @@ class ConditionOr(ConditionList):
 class ConditionUnnammed(Condition):
     """Represents an unnamed condition which is basically a nested Equals"""
 
-    def __init__(self, condition: Any, all_conditions: dict[str, dict]) -> None:
+    def __init__(
+        self,
+        condition: Any,
+        all_conditions: dict[str, dict],
+        memo: ConditionMemo | None = None,
+    ) -> None:
         super().__init__()
         if isinstance(condition, dict):
-            self._init_condition(condition, all_conditions)
+            self._init_condition(condition, all_conditions, memo)
         else:
             raise ValueError("Condition must have a value that is an object")
 
@@ -216,14 +249,44 @@ class ConditionUnnammed(Condition):
 class ConditionNamed(Condition):
     """The parent condition that directly represents a named condition in a template"""
 
-    def __init__(self, name: str, all_conditions: dict[str, dict]) -> None:
+    def __init__(
+        self,
+        name: str,
+        all_conditions: dict[str, dict],
+        memo: ConditionMemo | None = None,
+    ) -> None:
         super().__init__()
+        self._equals: list[Equal] | None = None
         condition = all_conditions.get(name)
-        if isinstance(condition, dict):
-            self._name = name
-            self._init_condition(condition, all_conditions)
-        else:
+        if not isinstance(condition, dict):
             raise ValueError(f"Condition {name} must have a value that is an object")
+        self._name = name
+        if memo is None:
+            self._init_condition(condition, all_conditions, memo)
+            return
+        if name in memo.building:
+            raise ValueError(f"Condition {name} refers to itself")
+        memo.building.add(name)
+        try:
+            self._init_condition(condition, all_conditions, memo)
+        finally:
+            memo.building.discard(name)
+        memo.named[name] = self
+
+    @classmethod
+    def named(
+        cls, name: str, all_conditions: dict[str, dict], memo: ConditionMemo | None
+    ) -> "ConditionNamed":
+        """The ConditionNamed for ``name``, built once per memo."""
+        if memo is not None and name in memo.named:
+            return memo.named[name]
+        return cls(name, all_conditions, memo)
+
+    @property
+    def equals(self) -> list[Equal]:
+        if self._equals is None:
+            self._equals = super().equals
+        return self._equals
 
     def build_true_cnf(self, params: dict[str, Symbol]) -> Any:
         """Build a SymPy CNF for a True based scenario

@@ -831,3 +831,39 @@ def test_allowed_values_compare_as_cloudformation_strings():
     with pytest.raises(Unsatisfiable):
         conditions.evolve({"T": True, "F": True})
     conditions.evolve({"T": True, "F": False})
+
+
+def _condition_chain(n, top_down):
+    """C0 is an Fn::Equals and each Ci negates C(i-1); written from the top
+    of the chain down when ``top_down``, so that the first condition read
+    references every other one."""
+    conditions = {"C0": {"Fn::Equals": [{"Ref": "P"}, "a"]}}
+    for i in range(1, n):
+        conditions[f"C{i}"] = {"Fn::Not": [{"Condition": f"C{i - 1}"}]}
+    if top_down:
+        conditions = dict(reversed(conditions.items()))
+    return {
+        "Parameters": {"P": {"Type": "String"}},
+        "Conditions": conditions,
+        "Resources": {},
+    }
+
+
+@pytest.mark.parametrize("top_down", [False, True])
+def test_long_condition_chain_in_either_order(top_down):
+    """A Condition: chain of 400 links is built and answered whether the
+    template lists it bottom-up or top-down (the walks over equals and
+    is_region are settled link by link, so no walk recurses along the chain)."""
+    n = 400
+    cfn = Template("", _condition_chain(n, top_down))
+    conditions = create_context_for_template(cfn).conditions
+    assert len(conditions.conditions) == n
+    last = f"C{n - 1}"
+    assert conditions.conditions[last].equals[0].hash == (
+        conditions.conditions["C0"].equals[0].hash
+    )
+    assert not conditions.conditions[last].is_region
+    # C(n-1) is C0 negated n-1 times, so pinning it fixes C0
+    pinned = conditions.evolve({last: True})
+    assert pinned.is_reachable("C0", n % 2 == 1)
+    assert not pinned.is_reachable("C0", n % 2 == 0)

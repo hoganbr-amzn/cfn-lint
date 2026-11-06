@@ -16,7 +16,7 @@ from sympy.assumptions.cnf import EncodedCNF
 from sympy.logic.boolalg import BooleanFalse, BooleanTrue
 from sympy.logic.inference import satisfiable
 
-from cfnlint.conditions._condition import ConditionNamed
+from cfnlint.conditions._condition import ConditionMemo, ConditionNamed
 from cfnlint.conditions._equals import Equal, EqualParameter
 from cfnlint.conditions._errors import UnknownSatisfisfaction
 from cfnlint.conditions._rule import Rule
@@ -39,6 +39,7 @@ class Conditions:
         self._conditions: dict[str, ConditionNamed] = {}
         self._parameters: dict[str, list[str]] = {}
         self._rules: list[Rule] = []
+        self._memo = ConditionMemo()
         self._init_conditions(cfn=cfn)
         self._init_parameters(cfn=cfn)
         self._init_rules(cfn=cfn)
@@ -49,7 +50,9 @@ class Conditions:
         if isinstance(conditions, dict):
             for k, _ in conditions.items():
                 try:
-                    self._conditions[k] = ConditionNamed(k, conditions)
+                    self._conditions[k] = ConditionNamed.named(
+                        k, conditions, self._memo
+                    )
                 except ValueError as e:
                     LOGGER.debug(
                         "Captured error while building condition %s: %s", k, str(e)
@@ -93,7 +96,7 @@ class Conditions:
             if not isinstance(v, dict):
                 continue
             try:
-                self._rules.append(Rule(v, conditions))
+                self._rules.append(Rule(v, conditions, self._memo))
             except ValueError as e:
                 LOGGER.debug("Captured error while building rule %s: %s", k, str(e))
             except Exception as e:  # pylint: disable=broad-exception-caught
