@@ -7,6 +7,7 @@ test builds its template from a small generator so the shape, not a fixture
 file, is what is pinned down.
 """
 
+import itertools
 from unittest import TestCase
 
 from cfnlint.conditions import _points as points
@@ -205,6 +206,33 @@ class TestPointBudget(TestCase):
         self.assertEqual(solver.fallbacks, fallbacks + 1)
         self.assertEqual([c.route for c in solver._components], ["sat", "sat"])
 
+    def test_tabulated_component_keeps_its_table_after_max_trips(self):
+        """A small component whose truth table scenario enumeration built
+        answers from that table, exact and shared, after trips elsewhere in
+        the lint have routed every other component to SAT."""
+        points.STEP_BUDGET = 500
+        points.MAX_TRIPS = 1
+        small = {
+            "Parameters": {"P": {"Type": "String"}, "Q": {"Type": "String"}},
+            "Conditions": {
+                "PQ": _eq(_ref("P"), _ref("Q")),
+                "Pa": _eq(_ref("P"), "a"),
+                "Qb": _eq(_ref("Q"), "b"),
+            },
+        }
+        cfn = Template("", _merge(budget_fallback(8, "X"), small), ["us-east-1"])
+        solver = cfn.conditions._solver
+        scenarios = list(
+            cfn.conditions.build_scenarios({"PQ": None, "Pa": None, "Qb": None})
+        )
+        self.assertEqual(len(scenarios), 7)
+        self.assertFalse(_ask(cfn, [("XH0", True), ("XE0", False)]))
+        self.assertEqual(solver.fallbacks, 1)
+        # P == Q, P == a and Q == b cannot hold together; the clauses alone
+        # cannot refute it, the table can
+        self.assertFalse(_ask(cfn, [("PQ", True), ("Pa", True), ("Qb", True)]))
+        self.assertTrue(_ask(cfn, [("PQ", True), ("Pa", True), ("Qb", False)]))
+
 
 def wide_eval(n):
     """One parameter Mode with n AllowedValues, Is_i = Mode == v_i, Any = Or
@@ -273,6 +301,101 @@ class TestWorkIsNodeEvaluations(TestCase):
         cfn = Template("", template, ["us-east-1"])
         self.assertFalse(_ask(cfn, [("Other", True)]))
         self.assertTrue(_ask(cfn, [("Other", False), ("Is1", True)]))
+
+
+def proj_subsets(n, m=12):
+    """m free parameters (2 ** m points, one component); W_i reads every
+    parameter; n queues each set 8 Fn::If properties on a distinct 8-subset
+    of the W_i, so every queue is a new scenario question."""
+    conds = {f"E{i}": _eq(_ref(f"P{i}"), "a") for i in range(m)}
+    for i in range(m):
+        terms = [_cond(f"E{i}")]
+        for d in range(1, m):
+            j, k = (i + d) % m, (i + d + 1) % m
+            terms.append({"Fn::And": [_cond(f"E{j}"), {"Fn::Not": [_cond(f"E{k}")]}]})
+        conds[f"W{i}"] = {"Fn::Or": terms}
+    props = [
+        "DelaySeconds",
+        "MaximumMessageSize",
+        "MessageRetentionPeriod",
+        "ReceiveMessageWaitTimeSeconds",
+        "VisibilityTimeout",
+        "KmsDataKeyReusePeriodSeconds",
+        "SqsManagedSseEnabled",
+        "QueueName",
+    ]
+    subsets = list(itertools.combinations(range(m), 8))
+    res = {}
+    for q in range(n):
+        res[f"Queue{q}"] = {
+            "Type": "AWS::SQS::Queue",
+            "Properties": {
+                name: {"Fn::If": [f"W{wi}", f"q{q}-{name}-a", f"q{q}-{name}-b"]}
+                for name, wi in zip(props, subsets[q % len(subsets)])
+            },
+        }
+    return {
+        "Parameters": {f"P{i}": {"Type": "String"} for i in range(m)},
+        "Conditions": conds,
+        "Resources": res,
+    }
+
+
+class TestScenarioTables(TestCase):
+    """Scenario enumeration over a small component answers from one
+    truth table per component instead of walking its points once per
+    distinct question; a large component goes prefix by prefix."""
+
+    @staticmethod
+    def _questions(cfn, n):
+        m = sum(1 for name in cfn.template["Conditions"] if name.startswith("W"))
+        subsets = list(itertools.combinations(range(m), 8))
+        for q in range(n):
+            yield [f"W{i}" for i in subsets[q % len(subsets)]]
+
+    def _check_against_cnf(self, cfn, n):
+        conditions = cfn.conditions
+        reference = PointSolver(conditions._cnf, PointModel())
+        for names in self._questions(cfn, n):
+            free = [conditions._solver_params[x] for x in names]
+            for pins in ([], [(conditions._solver_params["E0"], True)]):
+                got = conditions._solver.models(pins, free, 128)
+                want = reference.models(pins, free, 128)
+                self.assertEqual(got, want, names)
+
+    def test_small_component_answers_from_one_table(self):
+        cfn = Template("", proj_subsets(40), ["us-east-1"])
+        solver = cfn.conditions._solver
+        self._check_against_cnf(cfn, 40)
+        (component,) = solver._components
+        self.assertEqual(component.points, 4096)
+        self.assertIsNotNone(component.columns)
+        # every W_i has a column by now; further distinct questions and
+        # satisfiability checks evaluate no node at all
+        work = solver._work
+        for names in self._questions(cfn, 495):
+            syms = [cfn.conditions._solver_params[x] for x in names]
+            solver.models([], syms, 128)
+            solver.satisfiable([(syms[0], True), (syms[1], False)])
+        self.assertEqual(solver._work, work)
+
+    def test_large_component_goes_prefix_by_prefix(self):
+        template = proj_subsets(30)
+        # a 13th parameter joined to the component doubles its points past
+        # ENUM_MAX while every question still reads the first twelve
+        template["Parameters"]["P12"] = {"Type": "String"}
+        template["Conditions"]["E12"] = _eq(_ref("P12"), "a")
+        template["Conditions"]["X"] = {"Fn::And": [_cond("E12"), _cond("W0")]}
+        cfn = Template("", template, ["us-east-1"])
+        solver = cfn.conditions._solver
+        self.assertTrue(solver.satisfiable([]))  # builds the components
+        (component,) = solver._components
+        self.assertGreater(component.points, points.ENUM_MAX)
+        self._check_against_cnf(cfn, 30)
+        self.assertIsNone(component.columns)
+        # the prefixes are point-searched until COMPONENT_BUDGET trips, then
+        # SAT: the component budget is what keeps a large component cheap
+        self.assertEqual(component.route, "sat")
 
 
 def cond_chain_narrow(n, k=8):

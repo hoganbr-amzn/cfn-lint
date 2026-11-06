@@ -27,15 +27,20 @@ the lint rather than one question.
 
 from __future__ import annotations
 
+import itertools
 import logging
-from typing import Any, Iterable
+from typing import Any, Iterable, Iterator
 
 from cfnlint.conditions._boolean import ClauseSet, Dummy, Symbol
+from cfnlint.conditions._cdcl import CdclSolver
 from cfnlint.conditions._model import OTHER, Node, PointModel, compile_expr, symbols_of
-from cfnlint.conditions._solver import PinSolver
+from cfnlint.conditions._solver import alternate_ends
 
 LOGGER = logging.getLogger(__name__)
 
+# largest point product tabulated for scenario questions; larger components
+# are enumerated by point searches on prefixes
+ENUM_MAX = 4096
 # node evaluations one point search may spend (about 0.05 s) before SAT
 # answers; the largest search seen on real templates is a few thousand
 STEP_BUDGET = 200_000
@@ -65,6 +70,12 @@ class _ModelComponent:
         self.route = "points"
         self.points = 1
         self.answers: dict[frozenset, bool] = {}
+        # truth table of a small component: point index -> bit, one column
+        # (an int) per symbol asked so far; built on first use
+        self.columns: dict[Any, int] | None = None
+        self.table_refs: list = []
+        self.all_points = 0
+        self.rules_mask = 0
         self.searched = 0  # node evaluations spent in searches, in all
 
 
@@ -75,8 +86,9 @@ class PointSolver:
     it (the same scenario for the next resource) costs a dictionary lookup."""
 
     def __init__(self, cnf: ClauseSet, model: PointModel) -> None:
-        self._pin = PinSolver(cnf)
+        self._cdcl: CdclSolver | None = None  # built on the first SAT question
         self.fallbacks = 0  # point searches that ran out of budget
+        self._models: dict[Any, tuple[list[tuple[bool, ...]], bool]] = {}
         self._cnf = cnf
         self._model = model
         self._answers: dict[frozenset, bool] = {}
@@ -358,13 +370,21 @@ class PointSolver:
         ans = c.answers.get(key)
         if ans is not None:
             return ans
-        if c.route == "points" and (
+        if c.columns is not None:
+            # a small component already tabulated for scenario enumeration
+            # is answered from its table, exact and O(1) per pin, whatever
+            # route the lint's budget has given it since
+            mask = c.rules_mask
+            for sym, value in pins:
+                col = self._column(c, self._node_of(sym))
+                mask &= col if value else c.all_points & ~col
+            ans = mask != 0
+        elif c.route == "sat" or (
             # the lint has spent its share of point searches that led
             # nowhere, or this component has: its questions go to SAT
             self.fallbacks >= MAX_TRIPS or c.searched > COMPONENT_BUDGET
         ):
             c.route = "sat"
-        if c.route == "sat":
             ans = self._sat(pins)
         else:
             try:
@@ -385,8 +405,16 @@ class PointSolver:
         return ans
 
     def _sat(self, pins: list) -> bool:
-        """Exact answer under ``pins`` by the SAT solver on the CNF."""
-        return self._pin.satisfiable(pins)
+        """Exact answer under ``pins`` by the SAT solver, which holds the
+        template's clauses for the life of the lint and answers each pin set
+        by propagation from them.  A symbol in no clause constrains
+        nothing."""
+        encoding = self._cnf.encoding
+        if self._cdcl is None:
+            self._cdcl = CdclSolver(self._cnf.data, len(encoding))
+        return self._cdcl.solve(
+            sorted(encoding[s] if v else -encoding[s] for s, v in pins if s in encoding)
+        )
 
     def _eval(self, node: Node, vals: dict, memo: dict):
         """Three-valued evaluation of ``node`` over the partial assignment
@@ -570,6 +598,7 @@ class PointSolver:
         finally:
             c.searched += self._work - start
 
+    # ----- scenario enumeration
     def _node_of(self, sym) -> Node:
         if sym in self._nodes:
             return ("d", sym)
@@ -577,14 +606,142 @@ class PointSolver:
             return ("a", sym)
         return ("f", sym)
 
+    def _column(self, c: _ModelComponent, node: Node) -> int:
+        """Bitmask over the points of a small component of where ``node`` is
+        true; the component's points are indexed in product order over its
+        references.  One pass over the points per node, kept for the lint."""
+        assert c.columns is not None
+        key = node[1] if node[0] in ("a", "d", "f") else id(node)
+        col = c.columns.get(key)
+        if col is None:
+            col = 0
+            bit = 1
+            refs = c.table_refs
+            for point in itertools.product(*[self._cand[r] for r in refs]):
+                if self._eval(node, dict(zip(refs, point)), {}):
+                    col |= bit
+                bit <<= 1
+            c.columns[key] = col
+        return col
+
+    def _table_oracle(self, c: _ModelComponent, pins: list, free: list):
+        """A prefix-feasibility test over the truth table of a small
+        component (at most ENUM_MAX points): the points allowed by ``pins``
+        and the component's Rules, split by each asked symbol in turn.  The
+        table is shared by every question about the component, so a
+        template with many distinct questions pays one pass per symbol."""
+        if c.columns is None:
+            c.columns = {}
+            c.table_refs = sorted(c.refs, key=repr)
+            c.all_points = (1 << c.points) - 1
+            mask = c.all_points
+            for node in c.constraints:
+                mask &= self._column(c, node)
+            c.rules_mask = mask
+        mask = c.rules_mask
+        for sym, value in pins:
+            col = self._column(c, self._node_of(sym))
+            mask &= col if value else c.all_points & ~col
+        columns = [self._column(c, self._node_of(sym)) for sym in free]
+        masks: dict[tuple, int] = {(): mask}
+
+        def feasible(prefix: tuple) -> bool:
+            m = masks.get(prefix)
+            if m is None:
+                parent = masks[prefix[:-1]]
+                col = columns[len(prefix) - 1]
+                m = parent & col if prefix[-1] else parent & ~col
+                masks[prefix] = m
+            return m != 0
+
+        return feasible
+
     def models(
         self,
         pins: Iterable[tuple[Any, bool]],
         free: list[Any],
         limit: int,
     ) -> tuple[list[tuple[bool, ...]], bool]:
-        """Same contract as :meth:`PinSolver.models`, answered on the CNF."""
-        return self._pin.models(pins, free, limit)
+        """The satisfiable assignments of ``free`` (Symbols) under ``pins``
+        (Symbol, value), at most ``limit`` of them
+        taken from both ends of the True-first lexicographic order
+        (``alternate_ends``), sorted True first, and whether more exist.  A
+        point-routed component of at most ENUM_MAX points answers from its
+        truth table; any other component is asked prefix by prefix, each
+        prefix one cached ``_solve``."""
+        pinned: dict[Any, bool] = {}
+        for symbol, value in pins:
+            if pinned.setdefault(symbol, value) != value:
+                return [], False
+        key = (frozenset(pinned.items()), tuple(free), limit)
+        cached = self._models.get(key)
+        if cached is None:
+            cached = self._models[key] = self._enumerate(pinned, free, limit)
+        return cached
+
+    def _enumerate(self, pinned: dict, free: list, limit: int):
+        if not self.satisfiable(pinned.items()):
+            return [], False
+        comp_pins: dict[int, list] = {}
+        for sym, val in pinned.items():
+            c = self._comp_of.get(sym)
+            if c is not None:
+                comp_pins.setdefault(id(c), []).append((sym, val))
+        # per position: (fixed value or None, component or None)
+        slots: list[tuple[bool | None, _ModelComponent | None]] = []
+        comp_free: dict[int, list] = {}
+        comps: dict[int, _ModelComponent] = {}
+        for sym in free:
+            c = self._comp_of.get(sym)
+            if sym in pinned:
+                slots.append((pinned[sym], None))
+                continue
+            if c is None:
+                slots.append((None, None))
+                continue
+            comps[id(c)] = c
+            comp_free.setdefault(id(c), []).append(sym)
+            slots.append((None, c))
+        # a point-routed component of at most ENUM_MAX points answers every
+        # prefix from its truth table; any other is asked prefix by prefix
+        oracle: dict[int, Any] = {}
+        for cid, c in comps.items():
+            oracle[cid] = (
+                self._table_oracle(c, comp_pins.get(cid, []), comp_free[cid])
+                if c.route == "points" and c.points <= ENUM_MAX
+                else None
+            )
+        n = len(free)
+
+        def feasible(c: _ModelComponent, assigned: dict[int, list]) -> bool:
+            cid = id(c)
+            test = oracle[cid]
+            if test is not None:
+                return bool(test(tuple(v for _, v in assigned[cid])))
+            return self._solve(c, comp_pins.get(cid, []) + assigned[cid])
+
+        def walk(first: bool) -> Iterator[tuple[bool, ...]]:
+            assigned: dict[int, list] = {cid: [] for cid in comps}
+            current: list[bool] = []
+
+            def descend(depth: int) -> Iterator[tuple[bool, ...]]:
+                if depth == n:
+                    yield tuple(current)
+                    return
+                fixed, c = slots[depth]
+                for value in (first, not first) if fixed is None else (fixed,):
+                    current.append(value)
+                    if c is not None:
+                        assigned[id(c)].append((free[depth], value))
+                    if c is None or feasible(c, assigned):
+                        yield from descend(depth + 1)
+                    if c is not None:
+                        assigned[id(c)].pop()
+                    current.pop()
+
+            return descend(0)
+
+        return alternate_ends(walk, limit)
 
 
 def make_solver(cnf: ClauseSet, model: PointModel | None = None) -> PointSolver:
