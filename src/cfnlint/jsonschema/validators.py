@@ -22,6 +22,7 @@ import logging
 from collections import deque
 from collections.abc import Mapping
 from dataclasses import dataclass, field, fields
+from functools import lru_cache
 from typing import Any, Callable
 
 from cfnlint.conditions import UnknownSatisfisfaction
@@ -42,6 +43,15 @@ from cfnlint.schema.resolver import RefResolver, id_of
 from cfnlint.template import Template
 
 LOGGER = logging.getLogger(__name__)
+
+
+@lru_cache(maxsize=None)
+def _empty_template() -> Template:
+    # A validator built without a template gets an empty one.  Validators
+    # are created thousands of times per lint (one per extend_validator or
+    # propertyNames call) and building a Template builds its Conditions,
+    # Graph and Context, so share one.  Nothing mutates the default.
+    return Template(None, {})
 
 
 def create(
@@ -82,7 +92,7 @@ def create(
         function_filter: FunctionFilter = field(
             init=True, default_factory=lambda: function_filter_arg
         )
-        cfn: Template = field(default_factory=lambda: Template(None, {}))
+        cfn: Template = field(default_factory=lambda: _empty_template())
         context: Context = field(default=None)  # type: ignore
 
         fn_resolvers: Mapping[
