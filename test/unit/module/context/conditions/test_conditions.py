@@ -3,14 +3,17 @@ Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 SPDX-License-Identifier: MIT-0
 """
 
+import itertools
 import json
+import os
 from unittest.mock import patch
 
 import pytest
 from sympy import Not, Symbol
-from sympy.logic.inference import satisfiable
 
 from cfnlint.api import ManualArgs, lint
+from cfnlint.conditions._points import PointSolver
+from cfnlint.conditions._solver import PinSolver
 from cfnlint.context import create_context_for_template
 from cfnlint.context.conditions._condition import Condition
 from cfnlint.context.conditions._conditions import Conditions
@@ -557,6 +560,34 @@ def test_or_of_and_pairs_does_not_explode():
     assert not_prod.is_reachable("IsDeployed", True) is False
 
 
+class _SolveCounter:
+    """Counts the questions the engine's solver actually solves: a set of
+    pins on one component of the point solver, or one on the SAT solver.
+    The same quantity whichever backend CFNLINT_COND_ENGINE selects."""
+
+    def __init__(self):
+        self._pin = patch.object(
+            PinSolver, "_solve", autospec=True, side_effect=PinSolver._solve
+        )
+        self._point = patch.object(
+            PointSolver, "_solve", autospec=True, side_effect=PointSolver._solve
+        )
+
+    def __enter__(self):
+        self._pin_mock = self._pin.__enter__()
+        self._point_mock = self._point.__enter__()
+        return self
+
+    def __exit__(self, *exc):
+        self._point.__exit__(*exc)
+        self._pin.__exit__(*exc)
+        return False
+
+    @property
+    def call_count(self):
+        return self._pin_mock.call_count + self._point_mock.call_count
+
+
 def test_each_set_of_pins_is_solved_once():
     """Every Fn::If and condition scenario asks whether its pins are
     satisfiable, and most ask about the same pins. Solving each set once
@@ -565,9 +596,7 @@ def test_each_set_of_pins_is_solved_once():
     cfn = Template(None, template(), regions=["us-east-1"])
     base = create_context_for_template(cfn).conditions
 
-    with patch(
-        "cfnlint.conditions._solver.satisfiable", wraps=satisfiable
-    ) as solver:
+    with _SolveCounter() as solver:
         first = base.evolve({"IsUsEast1": True})
         # The first question also checks, once, that the template's clauses
         # are satisfiable on their own (one solve per connected component).
@@ -659,9 +688,7 @@ def test_solver_calls_do_not_grow_with_reused_conditions():
     many such resources there are (issue #4991)."""
     calls = []
     for alarms in (5, 20):
-        with patch(
-            "cfnlint.conditions._solver.satisfiable", wraps=satisfiable
-        ) as solver:
+        with _SolveCounter() as solver:
             matches = lint(
                 json.dumps(_alarms_reusing_conditions(alarms)),
                 config=ManualArgs(regions=["us-east-1"]),
@@ -706,6 +733,44 @@ def test_scenarios_do_not_depend_on_name_order():
     forward = scenarios(names)
     assert len(forward) == 128
     assert forward == scenarios(names[::-1])
+
+
+@pytest.mark.skipif(
+    os.environ.get("CFNLINT_COND_ENGINE") == "g",
+    reason="the g engine (sympy copy-and-solve, kept for comparison) returns "
+    "the subset its solver happens to find first",
+)
+def test_truncated_scenarios_keep_both_ends_of_the_order():
+    """Past the cap, the scenarios are taken alternately from the two ends
+    of the True-first order over the sorted condition names, so a nested
+    Fn::If's first branch (its condition true) and its last leaf (every
+    condition false) are both resolved whatever the solver (ledger A1)."""
+    names = [f"C{i}" for i in range(10)]
+    cfn = Template(
+        "",
+        {
+            "Parameters": {f"P{i}": {"Type": "String"} for i in range(10)},
+            "Conditions": {
+                f"C{i}": {"Fn::Equals": [{"Ref": f"P{i}"}, "x"]} for i in range(10)
+            },
+            "Resources": {},
+        },
+    )
+    context = create_context_for_template(cfn)
+    with patch(
+        "cfnlint.context.conditions._conditions.get_conditions_from_property",
+        return_value=set(names),
+    ):
+        scenarios = {
+            tuple(s.status[n] for n in sorted(names))
+            for _, s in context.conditions.evolve_from_instance({}, context)
+        }
+    assert len(scenarios) == 128
+    everything = sorted(
+        itertools.product((True, False), repeat=10),
+        key=lambda m: tuple(not v for v in m),
+    )
+    assert scenarios == set(everything[:64]) | set(everything[-64:])
 
 
 @pytest.mark.parametrize("reverse", [False, True])

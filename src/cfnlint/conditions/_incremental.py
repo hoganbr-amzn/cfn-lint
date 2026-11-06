@@ -114,6 +114,8 @@ class PureBackend:
         self.watches: list[list[list[int]]] = [[] for _ in range(n2)]
         # value per variable: 0 unassigned, 1 true, -1 false
         self.value = [0] * (size + 1)
+        # the same per literal index (see _idx), read in _propagate
+        self.lval = [0] * n2
         self.level = [0] * (size + 1)
         self.reason: list[list[int] | None] = [None] * (size + 1)
         self.trail: list[int] = []
@@ -177,7 +179,14 @@ class PureBackend:
 
     def _enqueue(self, lit: int, reason: list[int] | None) -> None:
         v = abs(lit)
-        self.value[v] = 1 if lit > 0 else -1
+        if lit > 0:
+            self.value[v] = 1
+            self.lval[2 * v] = 1
+            self.lval[2 * v + 1] = -1
+        else:
+            self.value[v] = -1
+            self.lval[2 * v] = -1
+            self.lval[2 * v + 1] = 1
         self.level[v] = len(self.trail_lim)
         self.reason[v] = reason
         self.trail.append(lit)
@@ -189,28 +198,35 @@ class PureBackend:
         if len(self.trail_lim) <= level:
             return
         start = self.trail_lim[level]
+        lval = self.lval
         for lit in self.trail[start:]:
             v = abs(lit)
             self.value[v] = 0
+            lval[2 * v] = 0
+            lval[2 * v + 1] = 0
             self.reason[v] = None
         del self.trail[start:]
         del self.trail_lim[level:]
         self.qhead = len(self.trail)
 
     def _propagate(self) -> list[int] | None:
-        """Unit propagation.  Returns the conflicting clause or None."""
+        """Unit propagation.  Returns the conflicting clause or None.
+
+        ``lval`` holds the truth of every literal by index (1 true, -1
+        false, 0 unassigned), so no sign or ``abs`` is taken per literal, and
+        each watch list is compacted in place."""
         watches = self.watches
-        value = self.value
-        while self.qhead < len(self.trail):
-            lit = self.trail[self.qhead]
+        lval = self.lval
+        trail = self.trail
+        while self.qhead < len(trail):
+            lit = trail[self.qhead]
             self.qhead += 1
             false_lit = -lit
-            wl = watches[self._idx(lit)]  # clauses watching -lit... see _watch
-            # _watch registers clause under idx(-w) for watched literal w, so
-            # the clauses in watches[idx(lit)] have -lit as a watched literal,
-            # which has just become false.
-            i = 0
-            keep: list[list[int]] = []
+            # _watch registers a clause under idx(-w) for each watched
+            # literal w, so the clauses in watches[idx(lit)] have -lit as a
+            # watched literal, which has just become false.
+            wl = watches[2 * lit if lit > 0 else -2 * lit + 1]
+            i = j = 0
             n = len(wl)
             while i < n:
                 clause = wl[i]
@@ -219,30 +235,33 @@ class PureBackend:
                     clause[0], clause[1] = clause[1], clause[0]
                 # now clause[1] == false_lit
                 first = clause[0]
-                fv = value[abs(first)]
-                if (fv == 1 and first > 0) or (fv == -1 and first < 0):
-                    keep.append(clause)
+                fv = lval[2 * first if first > 0 else -2 * first + 1]
+                if fv == 1:
+                    wl[j] = clause
+                    j += 1
                     continue
-                found = False
                 for k in range(2, len(clause)):
                     other = clause[k]
-                    ov = value[abs(other)]
-                    if not ((ov == 1 and other < 0) or (ov == -1 and other > 0)):
+                    if lval[2 * other if other > 0 else -2 * other + 1] != -1:
                         clause[1], clause[k] = other, false_lit
-                        watches[self._idx(-other)].append(clause)
-                        found = True
+                        watches[2 * other + 1 if other > 0 else -2 * other].append(
+                            clause
+                        )
                         break
-                if found:
-                    continue
-                keep.append(clause)
-                if fv == 0:
-                    self._enqueue(first, clause)
                 else:
-                    # conflict: copy remaining watchers back
-                    keep.extend(wl[i:])
-                    wl[:] = keep
-                    return clause
-            wl[:] = keep
+                    wl[j] = clause
+                    j += 1
+                    if fv == 0:
+                        self._enqueue(first, clause)
+                    else:
+                        # conflict: keep the remaining watchers
+                        while i < n:
+                            wl[j] = wl[i]
+                            i += 1
+                            j += 1
+                        del wl[j:]
+                        return clause
+            del wl[j:]
         return None
 
     # --- conflict analysis -------------------------------------------------

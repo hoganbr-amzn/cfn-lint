@@ -34,7 +34,7 @@ import atexit
 import itertools
 import json
 import os
-from typing import Any, Iterable
+from typing import Any, Iterable, Iterator
 
 from sympy import Symbol
 from sympy.assumptions.cnf import EncodedCNF
@@ -48,7 +48,7 @@ from sympy.logic.boolalg import (
     Or,
 )
 
-from cfnlint.conditions._solver import PinSolver
+from cfnlint.conditions._solver import PinSolver, alternate_ends
 from cfnlint.conditions._utils import cfn_string
 
 ENGINE = os.environ.get("CFNLINT_COND_ENGINE", "hybrid").strip().lower() or "hybrid"
@@ -707,8 +707,9 @@ class PointSolver:
         limit: int,
     ) -> tuple[list[tuple[bool, ...]], bool]:
         """Same contract as PinSolver.models: the satisfiable assignments of
-        ``free`` under ``pins``, the lexicographically first ``limit`` of them
-        (True first), and whether more exist.  A point-routed component
+        ``free`` under ``pins``, at most ``limit`` of them taken from both
+        ends of the True-first lexicographic order (``alternate_ends``),
+        sorted True first, and whether more exist.  A point-routed component
         enumerates its points over the references the asked conditions,
         the pins and its Rules read; any other component is asked prefix by
         prefix.  Exact for the model and deterministic."""
@@ -754,39 +755,38 @@ class PointSolver:
                 if c.route == "pp"
                 else None
             )
-        assigned: dict[int, list] = {cid: [] for cid in comps}
-        found: list[tuple[bool, ...]] = []
-        current: list[bool] = []
         n = len(free)
 
-        def feasible(c: _Component) -> bool:
+        def feasible(c: _Component, assigned: dict[int, list]) -> bool:
             cid = id(c)
             prefixes = oracle[cid]
             if prefixes is not None:
                 return tuple(v for _, v in assigned[cid]) in prefixes
             return self._solve(c, comp_pins.get(cid, []) + assigned[cid])
 
-        def descend(depth: int) -> bool:
-            if depth == n:
-                if len(found) >= limit:
-                    return True
-                found.append(tuple(current))
-                return False
-            fixed, c = slots[depth]
-            for value in (True, False) if fixed is None else (fixed,):
-                current.append(value)
-                if c is not None:
-                    assigned[id(c)].append((free[depth], value))
-                stop = (c is None or feasible(c)) and descend(depth + 1)
-                if c is not None:
-                    assigned[id(c)].pop()
-                current.pop()
-                if stop:
-                    return True
-            return False
+        def walk(first: bool) -> Iterator[tuple[bool, ...]]:
+            assigned: dict[int, list] = {cid: [] for cid in comps}
+            current: list[bool] = []
 
-        truncated = descend(0)
-        return found, truncated
+            def descend(depth: int) -> Iterator[tuple[bool, ...]]:
+                if depth == n:
+                    yield tuple(current)
+                    return
+                fixed, c = slots[depth]
+                for value in (first, not first) if fixed is None else (fixed,):
+                    current.append(value)
+                    if c is not None:
+                        assigned[id(c)].append((free[depth], value))
+                    if c is None or feasible(c, assigned):
+                        yield from descend(depth + 1)
+                    if c is not None:
+                        assigned[id(c)].pop()
+                    current.pop()
+
+            return descend(0)
+
+        # past ``limit``, keep both ends of the order (see alternate_ends)
+        return alternate_ends(walk, limit)
 
 
 def make_solver(cnf: EncodedCNF, model: PointModel | None):

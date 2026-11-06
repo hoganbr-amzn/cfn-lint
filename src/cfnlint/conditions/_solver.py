@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from itertools import product
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable, Iterator
 
 from sympy.assumptions.cnf import EncodedCNF
 from sympy.logic.inference import satisfiable
@@ -17,6 +17,42 @@ from cfnlint.conditions._incremental import make_backend
 
 def _product(n: int):
     return product((True, False), repeat=n)
+
+
+def alternate_ends(
+    walk: Callable[[bool], Iterator[tuple[bool, ...]]], limit: int
+) -> tuple[list[tuple[bool, ...]], bool]:
+    """The truncation policy of a scenario enumeration.
+
+    ``walk(first)`` yields the satisfiable assignments in lexicographic order
+    with ``first`` tried before ``not first`` at every position, so
+    ``walk(True)`` starts at the most-True end of the order and
+    ``walk(False)`` at the most-False end.  Up to ``limit`` assignments are
+    taken alternately from the two ends, so a truncated enumeration keeps
+    the scenarios with most conditions true and those with most false (the
+    all-false scenario resolves every nested Fn::If to its last leaf), and
+    the kept set depends only on the order of the asked symbols, not on the
+    solver.  Returns the assignments sorted True-first and whether more
+    exist.  When the two walks meet (one yields an assignment the other
+    already gave, or runs out) every assignment has been seen, so the
+    enumeration is complete and nothing else is solved."""
+    ends = (walk(True), walk(False))
+    found: list[tuple[bool, ...]] = []
+    seen: set[tuple[bool, ...]] = set()
+    turn = 0
+    truncated = False
+    while True:
+        model = next(ends[turn], None)
+        turn ^= 1
+        if model is None or model in seen:
+            break
+        if len(found) >= limit:
+            truncated = True
+            break
+        found.append(model)
+        seen.add(model)
+    found.sort(key=lambda m: tuple(not v for v in m))
+    return found, truncated
 
 
 @dataclass(frozen=True)
@@ -268,11 +304,11 @@ class PinSolver:
     def _enumerate_incremental(
         self, pins: frozenset[tuple[int, bool]], free: list[int], limit: int
     ) -> tuple[list[tuple[bool, ...]], bool]:
-        """Depth-first over ``free`` in order, True before False, keeping a
-        prefix only when the components it touches stay satisfiable under
-        the pins and the prefix as assumptions.  Yields the lexicographically
-        first ``limit`` assignments (True first), exactly, and whether more
-        exist.  Each step is one assumption solve on one component."""
+        """Depth-first over ``free`` in order, keeping a prefix only when the
+        components it touches stay satisfiable under the pins and the prefix
+        as assumptions.  Each step is one assumption solve on one component,
+        and a prefix is solved once however many times the walks reach it.
+        The assignments past ``limit`` are cut by :func:`alternate_ends`."""
         assert self._backends is not None
         backends = self._backends
         base: dict[int, list[int]] = {}
@@ -280,10 +316,9 @@ class PinSolver:
             index, number = self._position[variable]
             base.setdefault(index, []).append(number if value else -number)
         where = [self._position[v] for v in free]
-        assigned: dict[int, list[int]] = {}
         cache: dict[tuple[int, tuple[int, ...]], bool] = {}
 
-        def feasible(index: int) -> bool:
+        def feasible(index: int, assigned: dict[int, list[int]]) -> bool:
             assumptions = tuple(sorted(base.get(index, []) + assigned.get(index, [])))
             key = (index, assumptions)
             answer = cache.get(key)
@@ -293,32 +328,30 @@ class PinSolver:
 
         # the pins alone
         for index in base:
-            if not feasible(index):
+            if not feasible(index, {}):
                 return [], False
-        found: list[tuple[bool, ...]] = []
-        current: list[bool] = []
         n = len(free)
 
-        def descend(depth: int) -> bool:
-            # returns True to stop (limit + 1 reached)
-            if depth == n:
-                if len(found) >= limit:
-                    return True
-                found.append(tuple(current))
-                return False
-            index, number = where[depth]
-            for value in (True, False):
-                assigned.setdefault(index, []).append(number if value else -number)
-                current.append(value)
-                stop = feasible(index) and descend(depth + 1)
-                current.pop()
-                assigned[index].pop()
-                if stop:
-                    return True
-            return False
+        def walk(first: bool) -> Iterator[tuple[bool, ...]]:
+            assigned: dict[int, list[int]] = {}
+            current: list[bool] = []
 
-        truncated = descend(0)
-        return found, truncated
+            def descend(depth: int) -> Iterator[tuple[bool, ...]]:
+                if depth == n:
+                    yield tuple(current)
+                    return
+                index, number = where[depth]
+                for value in (first, not first):
+                    assigned.setdefault(index, []).append(number if value else -number)
+                    current.append(value)
+                    if feasible(index, assigned):
+                        yield from descend(depth + 1)
+                    current.pop()
+                    assigned[index].pop()
+
+            return descend(0)
+
+        return alternate_ends(walk, limit)
 
     @staticmethod
     def _is_satisfiable(clauses: list[set[int]], size: int) -> bool:
