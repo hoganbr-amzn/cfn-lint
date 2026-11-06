@@ -180,8 +180,19 @@ class Conditions:
                         equal_vars[c_equal.hash] = BooleanFalse()
                 else:
                     equal_vars[c_equal.hash] = Symbol(c_equal.hash)
-                    for param in c_equal.parameters:
-                        by_parameter.setdefault(param.hash, []).append(c_equal.hash)
+                    # Only an Fn::Equals against a literal fixes the
+                    # parameter's value.  Two of them on one parameter with
+                    # different literals are exclusive; a Ref-vs-Ref
+                    # Fn::Equals (P == Q) is not exclusive with P == "x" (P
+                    # and Q can both be "x") nor with P == R, so it joins no
+                    # group.  The context engine groups the same way.
+                    if isinstance(c_equal.left, str) or isinstance(
+                        c_equal.right, str
+                    ):
+                        for param in c_equal.parameters:
+                            by_parameter.setdefault(param.hash, []).append(
+                                c_equal.hash
+                            )
                 equals[c_equal.hash] = c_equal
 
         for rule in self._rules:
@@ -190,8 +201,8 @@ class Conditions:
         for condition_name in condition_names:
             _build_equal_vars(self._conditions[condition_name].equals)
 
-        # Two Fn::Equals that compare the same parameter cannot both be
-        # true (NAND).
+        # Two Fn::Equals that compare the same parameter to different
+        # literals cannot both be true (NAND).
         for hashes in by_parameter.values():
             add_at_most_one(cnf, [equal_vars[h] for h in hashes])
 
