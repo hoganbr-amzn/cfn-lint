@@ -39,16 +39,15 @@ import json
 import os
 from typing import Any, Iterable, Iterator
 
-from sympy import Symbol
-from sympy.assumptions.cnf import EncodedCNF
-from sympy.logic.boolalg import (
+from cfnlint.conditions._boolean import (
     And,
     BooleanFalse,
     BooleanTrue,
-    Equivalent,
+    ClauseSet,
     Implies,
     Not,
     Or,
+    Symbol,
 )
 
 from cfnlint.conditions._solver import PinSolver, alternate_ends
@@ -203,10 +202,6 @@ def _compile(expr: Any, atoms, defs, free, unknown) -> tuple:
                 _compile(b, atoms, defs, free, unknown),
             ),
         )
-    if isinstance(expr, Equivalent):
-        parts = [_compile(a, atoms, defs, free, unknown) for a in expr.args]
-        a, b = parts[0], parts[1]
-        return ("and", (("or", (("not", a), b)), ("or", (a, ("not", b)))))
     raise ValueError(f"unsupported expression {type(expr)}")
 
 
@@ -250,7 +245,7 @@ class _Component:
 class PointSolver:
     """Same interface as PinSolver: ``satisfiable(pins)``."""
 
-    def __init__(self, cnf: EncodedCNF, model: PointModel, mode: str) -> None:
+    def __init__(self, cnf: ClauseSet, model: PointModel, mode: str) -> None:
         self._pin = PinSolver(cnf, incremental=True)
         self.truncations = 0
         self._models: dict[Any, tuple[list[tuple[bool, ...]], bool]] = {}
@@ -1019,7 +1014,7 @@ class PointSolver:
         return alternate_ends(walk, limit)
 
 
-def make_solver(cnf: EncodedCNF, model: PointModel | None):
+def make_solver(cnf: ClauseSet, model: PointModel | None):
     """The solver for one engine's CNF, by CFNLINT_COND_ENGINE."""
     if ENGINE in ("pp", "hybrid", "dual") and model is not None:
         return PointSolver(cnf, model, "pp" if ENGINE == "dual" else ENGINE)

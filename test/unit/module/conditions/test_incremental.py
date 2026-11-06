@@ -6,10 +6,9 @@ SPDX-License-Identifier: MIT-0
 import itertools
 
 import pytest
-from sympy import Symbol
-from sympy.assumptions.cnf import EncodedCNF
 
 from cfnlint.conditions import _incremental
+from cfnlint.conditions._boolean import ClauseSet, Symbol
 from cfnlint.conditions._solver import PinSolver, alternate_ends
 
 try:
@@ -26,9 +25,7 @@ def _solver(clauses, nvars, mode, monkeypatch):
     monkeypatch.setenv("CFNLINT_COND_SAT", mode)
     monkeypatch.setattr(_incremental, "_PYSAT_MIN_SIZE", 0)
     syms = [Symbol(f"x{i}") for i in range(nvars)]
-    cnf = EncodedCNF()
-    cnf.encoding = {s: i + 1 for i, s in enumerate(syms)}
-    cnf.data = [set(c) for c in clauses]
+    cnf = ClauseSet([set(c) for c in clauses], {s: i + 1 for i, s in enumerate(syms)})
     return PinSolver(cnf, incremental=mode != "g"), syms
 
 

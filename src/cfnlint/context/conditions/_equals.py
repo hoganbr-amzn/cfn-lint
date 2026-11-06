@@ -10,8 +10,7 @@ from dataclasses import dataclass, field
 from functools import cmp_to_key
 from typing import Any
 
-from sympy import Symbol, false, true
-from sympy.logic.boolalg import BooleanAtom
+from cfnlint.conditions._boolean import BooleanAtom, Symbol, false, true
 
 from cfnlint.conditions._utils import cfn_string, get_hash
 from cfnlint.helpers import is_function

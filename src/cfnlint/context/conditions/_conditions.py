@@ -10,8 +10,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Iterator
 
-from sympy import And, Implies, Not, Or, Symbol
-from sympy.assumptions.cnf import EncodedCNF
+from cfnlint.conditions._boolean import And, ClauseSet, Implies, Not, Or, Symbol
 
 from cfnlint.conditions._points import PointModel, fold, make_solver
 from cfnlint.conditions._solver import PinSolver
@@ -70,7 +69,7 @@ _EVOLVED_MAX = 65536
 class Conditions:
     conditions: Mapping[str, Condition] = field(init=True, default_factory=dict)
     # The template's condition definitions and parameter constraints.
-    _base_cnf: EncodedCNF = field(init=True, default_factory=EncodedCNF, compare=False)
+    _base_cnf: ClauseSet = field(init=True, default_factory=ClauseSet, compare=False)
     # Every pinned condition, including those assumed by scenario enumeration.
     _pins: frozenset[tuple[str, bool]] = field(
         init=True, default_factory=frozenset, compare=False
@@ -114,16 +113,16 @@ class Conditions:
     )
 
     @property
-    def cnf(self) -> EncodedCNF:
+    def cnf(self) -> ClauseSet:
         """The template's condition clauses plus every pin, as a new copy."""
         return self._cnf_with(self._pins)
 
     @property
-    def hard_cnf(self) -> EncodedCNF:
+    def hard_cnf(self) -> ClauseSet:
         """The template's condition clauses plus the hard pins, as a new copy."""
         return self._cnf_with(self._hard_pins)
 
-    def _cnf_with(self, pins: frozenset[tuple[str, bool]]) -> EncodedCNF:
+    def _cnf_with(self, pins: frozenset[tuple[str, bool]]) -> ClauseSet:
         cnf = self._base_cnf.copy()
         for name, value in sorted(pins):
             sym = self._condition_symbols[name]
@@ -152,7 +151,7 @@ class Conditions:
         for k, v in conditions.items():
             if not isinstance(k, str):
                 # Condition logical IDs must be strings (rule E8001 reports
-                # non-string names).  Skip them here so the sympy Symbol
+                # non-string names).  Skip them here so the Symbol
                 # table below never receives a non-string name, which would
                 # raise TypeError before any rule gets to run.
                 continue
@@ -171,8 +170,8 @@ class Conditions:
                     {"Fn::Equals": [None, None]}, conditions
                 )
 
-        # Build EncodedCNF with a Symbol per condition name
-        cnf = EncodedCNF()
+        # Build the clause set with a Symbol per condition name
+        cnf = ClauseSet()
         condition_symbols: dict[str, Symbol] = {}
         for name, cond in obj.items():
             sym = Symbol(name)

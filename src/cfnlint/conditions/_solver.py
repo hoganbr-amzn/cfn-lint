@@ -9,9 +9,7 @@ from dataclasses import dataclass
 from itertools import product
 from typing import Any, Callable, Iterable, Iterator
 
-from sympy.assumptions.cnf import EncodedCNF
-from sympy.logic.inference import satisfiable
-
+from cfnlint.conditions._boolean import ClauseSet
 from cfnlint.conditions._incremental import make_backend
 
 
@@ -84,7 +82,7 @@ class PinSolver:
     touched ones are solved together with the pins.
     """
 
-    def __init__(self, cnf: EncodedCNF, incremental: bool = False) -> None:
+    def __init__(self, cnf: ClauseSet, incremental: bool = False) -> None:
         self._cnf = cnf
         # one persistent incremental solver per component instead of a
         # copy-and-solve through sympy per question
@@ -286,6 +284,10 @@ class PinSolver:
             # True-first lexicographic order, as itertools.product gave
             return sorted(found, key=lambda m: tuple(not v for v in m)), truncated
 
+        # the g comparison mode solves through sympy; imported only here
+        from sympy.assumptions.cnf import EncodedCNF
+        from sympy.logic.inference import satisfiable
+
         while True:
             model = satisfiable(EncodedCNF(clauses, {n: n for n in range(1, size + 1)}))
             if not model:
@@ -355,6 +357,10 @@ class PinSolver:
 
     @staticmethod
     def _is_satisfiable(clauses: list[set[int]], size: int) -> bool:
+        # the g comparison mode solves through sympy; imported only here
+        from sympy.assumptions.cnf import EncodedCNF
+        from sympy.logic.inference import satisfiable
+
         encoded = EncodedCNF(clauses, {n: n for n in range(1, size + 1)})
         return bool(satisfiable(encoded))
 

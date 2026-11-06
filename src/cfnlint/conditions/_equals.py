@@ -9,8 +9,7 @@ import json
 import logging
 from typing import Any, Mapping, Tuple
 
-from sympy import Symbol
-from sympy.logic.boolalg import BooleanFalse, BooleanTrue
+from cfnlint.conditions._boolean import BooleanFalse, BooleanTrue, Symbol
 
 from cfnlint.conditions._utils import cfn_string, get_hash
 from cfnlint.helpers import is_function

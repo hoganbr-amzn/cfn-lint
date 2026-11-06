@@ -9,8 +9,7 @@ from dataclasses import dataclass, field
 from functools import cached_property
 from typing import Any
 
-from sympy import And, Not, Or, Symbol
-from sympy.logic.boolalg import BooleanFunction
+from cfnlint.conditions._boolean import And, BooleanFunction, Not, Or, Symbol
 
 from cfnlint.conditions._utils import get_hash
 from cfnlint.context.conditions._equals import Equal

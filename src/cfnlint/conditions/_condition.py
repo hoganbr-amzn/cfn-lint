@@ -7,8 +7,14 @@ from __future__ import annotations
 
 from typing import Any, Dict, Mapping, Sequence, Union
 
-from sympy import And, Not, Or, Symbol
-from sympy.logic.boolalg import BooleanFunction, BooleanTrue
+from cfnlint.conditions._boolean import (
+    And,
+    BooleanFunction,
+    BooleanTrue,
+    Not,
+    Or,
+    Symbol,
+)
 
 from cfnlint.conditions._equals import Equal
 from cfnlint.helpers import FUNCTION_CONDITIONS

@@ -9,9 +9,9 @@ import os
 from unittest.mock import patch
 
 import pytest
-from sympy import Not, Symbol
 
 from cfnlint.api import ManualArgs, lint
+from cfnlint.conditions._boolean import Not, Symbol
 from cfnlint.conditions._points import PointSolver
 from cfnlint.conditions._solver import PinSolver
 from cfnlint.context import create_context_for_template

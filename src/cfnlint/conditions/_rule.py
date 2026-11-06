@@ -8,8 +8,13 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict
 
-from sympy import And, Implies, Symbol
-from sympy.logic.boolalg import BooleanFunction, BooleanTrue
+from cfnlint.conditions._boolean import (
+    And,
+    BooleanFunction,
+    BooleanTrue,
+    Implies,
+    Symbol,
+)
 
 from cfnlint.conditions._condition import (
     ConditionAnd,

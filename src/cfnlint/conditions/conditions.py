@@ -10,9 +10,13 @@ import traceback
 from functools import lru_cache
 from typing import Any, Iterable, Iterator, Set, Tuple
 
-from sympy import Not, Symbol
-from sympy.assumptions.cnf import EncodedCNF
-from sympy.logic.boolalg import BooleanFalse, BooleanTrue
+from cfnlint.conditions._boolean import (
+    BooleanFalse,
+    BooleanTrue,
+    ClauseSet,
+    Not,
+    Symbol,
+)
 
 from cfnlint.conditions._condition import ConditionNamed, _Memo
 from cfnlint.conditions._equals import Equal, EqualParameter
@@ -154,8 +158,8 @@ class Conditions:
 
     def _build_cnf(
         self, condition_names: list[str]
-    ) -> Tuple[EncodedCNF, dict[str, Any]]:
-        cnf = EncodedCNF()
+    ) -> Tuple[ClauseSet, dict[str, Any]]:
+        cnf = ClauseSet()
 
         # build parameters and equals into solver
         equal_vars: dict[str, Symbol | BooleanFalse | BooleanTrue] = {}

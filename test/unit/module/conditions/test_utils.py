@@ -8,11 +8,17 @@ import itertools
 import json
 import unittest
 
-from sympy import And, Equivalent, Implies, Not, Or, Symbol, Xor
-from sympy.assumptions.cnf import EncodedCNF
-from sympy.logic.boolalg import BooleanFalse, BooleanFunction, BooleanTrue
-from sympy.logic.inference import satisfiable
-
+from cfnlint.conditions._boolean import (
+    And,
+    BooleanFalse,
+    BooleanFunction,
+    BooleanTrue,
+    ClauseSet,
+    Implies,
+    Not,
+    Or,
+    Symbol,
+)
 from cfnlint.conditions._utils import (
     ObjectEncoder,
     _cached_hash,
@@ -345,12 +351,45 @@ class TestUtils(unittest.TestCase):
         # verify the result is consistent
 
 
+def _value(expr, values):
+    """Truth value of ``expr`` under ``values`` (Symbol -> bool)"""
+    if isinstance(expr, BooleanTrue):
+        return True
+    if isinstance(expr, BooleanFalse):
+        return False
+    if isinstance(expr, Not):
+        return not _value(expr.args[0], values)
+    if isinstance(expr, And):
+        return all(_value(a, values) for a in expr.args)
+    if isinstance(expr, Or):
+        return any(_value(a, values) for a in expr.args)
+    if isinstance(expr, Implies):
+        return (not _value(expr.args[0], values)) or _value(expr.args[1], values)
+    return values[expr]
+
+
+def _satisfiable(cnf: ClauseSet, pins) -> bool:
+    """Brute force: is ``cnf`` satisfiable with ``pins`` (Symbol, bool)"""
+    fixed = {cnf.encoding[s]: v for s, v in pins if s in cnf.encoding}
+    free = [n for n in range(1, len(cnf.encoding) + 1) if n not in fixed]
+    for bits in itertools.product([True, False], repeat=len(free)):
+        model = dict(fixed)
+        model.update(zip(free, bits))
+        if all(
+            any(lit != 0 and model[abs(lit)] == (lit > 0) for lit in clause)
+            for clause in cnf.data
+        ):
+            return True
+    return False
+
+
 class TestAddEquivalence(unittest.TestCase):
     """Test the Tseitin encoding used for condition equivalences"""
 
     def test_matches_direct_encoding(self):
         """For every assignment of the original variables the encoded
-        equivalence is satisfiable exactly when the direct one is"""
+        equivalence is satisfiable exactly when the symbol takes the value
+        of the expression"""
         a, b, c, d = Symbol("a"), Symbol("b"), Symbol("c"), Symbol("d")
         sym = Symbol("cond")
         expressions = [
@@ -361,28 +400,28 @@ class TestAddEquivalence(unittest.TestCase):
             Or(And(a, b), And(c, d), Not(Or(a, d))),
             Not(And(Or(a, b), Not(c))),
             Implies(And(a, b), Or(c, d)),
-            Equivalent(a, Or(b, c)),
-            Xor(a, b, c),
+            # a <-> (b | c)
+            And(Implies(a, Or(b, c)), Implies(Or(b, c), a)),
+            # a xor b xor c
+            Or(
+                And(a, Not(b), Not(c)),
+                And(Not(a), b, Not(c)),
+                And(Not(a), Not(b), c),
+                And(a, b, c),
+            ),
             And(Or(a, b), Or(a, b), c),
             BooleanTrue(),
             BooleanFalse(),
         ]
         for expr in expressions:
-            direct = EncodedCNF()
-            direct.add_prop(Equivalent(sym, expr))
-            encoded = EncodedCNF()
+            encoded = ClauseSet()
             add_equivalence(encoded, sym, expr)
             for values in itertools.product([True, False], repeat=5):
-                pins = [s if v else Not(s) for s, v in zip([a, b, c, d, sym], values)]
-                expected = direct.copy()
-                actual = encoded.copy()
-                for pin in pins:
-                    expected.add_prop(pin)
-                    actual.add_prop(pin)
+                assignment = dict(zip([a, b, c, d, sym], values))
                 self.assertEqual(
-                    bool(satisfiable(expected)),
-                    bool(satisfiable(actual)),
-                    f"{expr} with {pins}",
+                    _value(expr, assignment) == assignment[sym],
+                    _satisfiable(encoded, assignment.items()),
+                    f"{expr} with {assignment}",
                 )
 
     def test_or_of_ands_is_linear(self):
@@ -390,21 +429,34 @@ class TestAddEquivalence(unittest.TestCase):
         when each subterm gets its own variable"""
         s = Symbol("s")
         expr = Or(*[And(Symbol(f"r{i}"), s) for i in range(40)])
-        cnf = EncodedCNF()
+        cnf = ClauseSet()
         add_equivalence(cnf, Symbol("cond"), expr)
         self.assertLess(len(cnf.data), 200)
 
     def test_single_and_or_needs_no_auxiliary_variable(self):
         """The condition symbol is the variable of the outermost And/Or, so
-        the common one-level condition encodes exactly like Equivalent"""
+        the common one-level condition encodes exactly like the direct
+        equivalence"""
         a, b, cond = Symbol("a"), Symbol("b"), Symbol("cond")
-        for expr in [And(a, b), Or(a, b)]:
-            direct = EncodedCNF()
-            direct.add_prop(Equivalent(cond, expr))
-            encoded = EncodedCNF()
+        direct = {
+            "and": [
+                {(cond, False), (a, True)},
+                {(cond, False), (b, True)},
+                {(cond, True), (a, False), (b, False)},
+            ],
+            "or": [
+                {(cond, False), (a, True), (b, True)},
+                {(cond, True), (a, False)},
+                {(cond, True), (b, False)},
+            ],
+        }
+        for name, expr in [("and", And(a, b)), ("or", Or(a, b))]:
+            encoded = ClauseSet()
             add_equivalence(encoded, cond, expr)
-            self.assertCountEqual(encoded.symbols, [a, b, cond])
-            self.assertCountEqual(_decode(encoded), _decode(direct))
+            self.assertCountEqual(encoded.encoding, [a, b, cond])
+            self.assertCountEqual(
+                _decode(encoded), [frozenset(c) for c in direct[name]]
+            )
 
     def test_repeated_subterm_shares_one_variable(self):
         """A subterm that appears under several parents is encoded once and
@@ -413,24 +465,20 @@ class TestAddEquivalence(unittest.TestCase):
         sym = Symbol("cond")
         shared = Or(a, b)
         expr = Or(And(shared, c), And(shared, d))
-        direct = EncodedCNF()
-        direct.add_prop(Equivalent(sym, expr))
-        encoded = EncodedCNF()
+        encoded = ClauseSet()
         add_equivalence(encoded, sym, expr)
         # a, b, c, d, cond plus one variable each for the two Ands and one
         # for the shared Or -- not a second copy of the shared Or
-        self.assertEqual(len(encoded.symbols), 8)
+        self.assertEqual(len(encoded.encoding), 8)
         for values in itertools.product([True, False], repeat=5):
-            pins = [s if v else Not(s) for s, v in zip([a, b, c, d, sym], values)]
-            expected = direct.copy()
-            actual = encoded.copy()
-            for pin in pins:
-                expected.add_prop(pin)
-                actual.add_prop(pin)
-            self.assertEqual(bool(satisfiable(expected)), bool(satisfiable(actual)))
+            assignment = dict(zip([a, b, c, d, sym], values))
+            self.assertEqual(
+                _value(expr, assignment) == assignment[sym],
+                _satisfiable(encoded, assignment.items()),
+            )
 
-    def test_boolean_function_without_nnf_rewrite_is_a_literal(self):
-        """A BooleanFunction that to_nnf leaves unchanged is treated as an
+    def test_unknown_boolean_function_is_a_literal(self):
+        """A BooleanFunction the encoder does not know is treated as an
         opaque literal instead of recursing forever"""
 
         class Opaque(BooleanFunction):
@@ -439,24 +487,19 @@ class TestAddEquivalence(unittest.TestCase):
         a, b, sym = Symbol("a"), Symbol("b"), Symbol("cond")
         opaque = Opaque(a)
         expr = And(opaque, b)
-        encoded = EncodedCNF()
+        encoded = ClauseSet()
         add_equivalence(encoded, sym, expr)
         for values in itertools.product([True, False], repeat=3):
-            pins = [s if v else Not(s) for s, v in zip([opaque, b, sym], values)]
-            actual = encoded.copy()
-            for pin in pins:
-                actual.add_prop(pin)
+            pins = list(zip([opaque, b, sym], values))
             self.assertEqual(
-                bool(satisfiable(actual)), values[2] == (values[0] and values[1])
+                _satisfiable(encoded, pins), values[2] == (values[0] and values[1])
             )
 
 
-def _decode(cnf: EncodedCNF) -> list[frozenset]:
+def _decode(cnf: ClauseSet) -> list[frozenset]:
     """Clauses of ``cnf`` as (symbol, is_positive) pairs"""
-    return [
-        frozenset((cnf.symbols[abs(i) - 1], i > 0) for i in clause)
-        for clause in cnf.data
-    ]
+    symbols = {n: s for s, n in cnf.encoding.items()}
+    return [frozenset((symbols[abs(i)], i > 0) for i in clause) for clause in cnf.data]
 
 
 if __name__ == "__main__":
