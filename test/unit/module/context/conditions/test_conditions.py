@@ -841,3 +841,27 @@ def test_condition_evolve_calls_do_not_grow_with_resources():
 
     assert calls[0] > 0
     assert calls[0] == calls[1]
+
+
+def test_true_and_one_are_different_equals():
+    """Fn::Equals [Ref P, true] and Fn::Equals [Ref P, 1] compare P with the
+    strings "true" and "1"; they used to share one hash, and so one solver
+    variable, because True == 1 in Python."""
+    conditions = Conditions.create_from_instance(
+        {
+            "C0": {"Fn::Equals": [{"Ref": "P0"}, True]},
+            "T": {"Fn::Not": [{"Fn::Equals": [{"Ref": "P0"}, 1]}]},
+        },
+        {},
+        {},
+    )
+    hashes = {
+        eql.hash for condition in conditions.conditions.values() for eql in condition.equals
+    }
+    assert len(hashes) == 2
+    # P0 = "true" satisfies both
+    evolved = conditions.evolve({"C0": True, "T": True})
+    assert evolved.status == {"C0": True, "T": True}
+    # P0 = "1" satisfies neither; the two equals are still exclusive
+    with pytest.raises(Unsatisfiable):
+        conditions.evolve({"C0": True, "T": False})
