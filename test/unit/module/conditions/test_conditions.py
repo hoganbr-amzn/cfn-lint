@@ -120,6 +120,31 @@ class TestConditions(TestCase):
                 ],
             )
 
+    def test_satisfiable_pins_constant_equals(self):
+        """A parameter value pins the Fn::Equals the template encodes, so a
+        value outside AllowedValues cannot make that Fn::Equals true"""
+        cfn = Template(
+            "",
+            {
+                "Parameters": {
+                    "Env": {"Type": "String", "AllowedValues": ["dev", "prod"]},
+                    "Other": {"Type": "String"},
+                },
+                "Conditions": {
+                    "IsStageOrOther": {
+                        "Fn::Or": [
+                            {"Fn::Equals": [{"Ref": "Env"}, "stage"]},
+                            {"Fn::Equals": [{"Ref": "Other"}, "y"]},
+                        ]
+                    },
+                },
+            },
+        )
+        satisfiable = cfn.conditions.satisfiable
+        self.assertFalse(satisfiable({"IsStageOrOther": True}, {"Env": "stage"}))
+        self.assertTrue(satisfiable({"IsStageOrOther": True}, {"Env": "dev"}))
+        self.assertTrue(satisfiable({"IsStageOrOther": False}, {"Env": "dev"}))
+
     def test_build_scenarios_in_a_region(self):
         """With a region, every condition gets a value in each scenario, and a
         condition decided by the region takes only that value"""

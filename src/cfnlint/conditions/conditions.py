@@ -472,12 +472,13 @@ class Conditions:
                     continue
 
                 at_least_one_param_found = True
-                # A static Fn::Equals was pinned through a fresh
-                # Symbol(hash) that shares no clause with the template, so
-                # the pin had no effect; keep that by pinning only Symbols.
-                equal = self._solver_params[c_equals.hash]
-                if isinstance(equal, Symbol):
-                    pins.append((equal, c_equals.test(found_params)))
+                # Pin the Fn::Equals the template encodes. When it is a
+                # constant (static, or false because the value is not in the
+                # parameter's AllowedValues) a value that disagrees with it
+                # is unsatisfiable rather than ignored.
+                pins.append(
+                    (self._solver_params[c_equals.hash], c_equals.test(found_params))
+                )
                 pins.append((self._solver_params[condition_name], bool(opt)))
 
         if at_least_one_param_found is False:
