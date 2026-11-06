@@ -86,6 +86,40 @@ class TestConditions(TestCase):
             == [sorted(s.items()) for s in backward]
         )
 
+    def test_self_equals_constrains_nothing(self):
+        """Ref P against Ref P is always true and says nothing about P, so it
+        does not exclude another Fn::Equals on P, in either definition order"""
+        for names in (
+            ("DynamicFirst", "StaticSecond"),
+            ("StaticSecond", "DynamicFirst"),
+        ):
+            definitions = {
+                "DynamicFirst": {"Fn::Equals": [{"Ref": "P"}, "x"]},
+                "StaticSecond": {"Fn::Equals": [{"Ref": "P"}, {"Ref": "P"}]},
+            }
+            cfn = Template(
+                "",
+                {
+                    "Parameters": {"P": {"Type": "String"}},
+                    "Conditions": {name: definitions[name] for name in names},
+                },
+            )
+            self.assertTrue(
+                cfn.conditions.satisfiable({"DynamicFirst": True}, {"P": "x"})
+            )
+            self.assertTrue(cfn.conditions.is_always_true("StaticSecond"))
+            self.assertEqual(
+                list(
+                    cfn.conditions.build_scenarios(
+                        {"DynamicFirst": None, "StaticSecond": None}
+                    )
+                ),
+                [
+                    {"DynamicFirst": True, "StaticSecond": True},
+                    {"DynamicFirst": False, "StaticSecond": True},
+                ],
+            )
+
     def test_check_implies(self):
         """We properly validate implies scenarios"""
         template = {

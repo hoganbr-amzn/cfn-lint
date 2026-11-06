@@ -148,14 +148,17 @@ class Conditions:
                     continue
 
                 if c_equal.is_static is not None:
+                    # A static Fn::Equals (two equal literals, or Ref P
+                    # against Ref P) has the same value whatever P is, so it
+                    # says nothing about P and joins no exclusion group.
                     if c_equal.is_static:
                         equal_vars[c_equal.hash] = BooleanTrue()
                     else:
                         equal_vars[c_equal.hash] = BooleanFalse()
                 else:
                     equal_vars[c_equal.hash] = Symbol(c_equal.hash)
-                for param in c_equal.parameters:
-                    by_parameter.setdefault(param.hash, []).append(c_equal.hash)
+                    for param in c_equal.parameters:
+                        by_parameter.setdefault(param.hash, []).append(c_equal.hash)
                 equals[c_equal.hash] = c_equal
 
         for rule in self._rules:
@@ -165,16 +168,9 @@ class Conditions:
             _build_equal_vars(self._conditions[condition_name].equals)
 
         # Two Fn::Equals that compare the same parameter cannot both be
-        # true (NAND). A static Fn::Equals that is true forces the others
-        # false; a false one constrains nothing.
+        # true (NAND).
         for hashes in by_parameter.values():
-            members = [equal_vars[h] for h in hashes]
-            symbols = [m for m in members if isinstance(m, Symbol)]
-            if any(isinstance(m, BooleanTrue) for m in members):
-                for sym in symbols:
-                    cnf.add_prop(Not(sym))
-            else:
-                add_at_most_one(cnf, symbols)
+            add_at_most_one(cnf, [equal_vars[h] for h in hashes])
 
         # Determine if a set of conditions can never be all false
         allowed_values = {k: list(v) for k, v in self._parameters.items()}
