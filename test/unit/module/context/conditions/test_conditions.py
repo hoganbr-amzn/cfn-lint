@@ -732,3 +732,29 @@ def test_self_equals_does_not_exclude_other_equals(reverse):
     }
     matches = lint(json.dumps(template), config=ManualArgs(regions=["us-east-1"]))
     assert sorted(m.rule.id for m in matches) == ["E3019", "E3019", "W8003"]
+
+
+def test_true_and_one_are_different_equals():
+    """Fn::Equals [Ref P, true] and Fn::Equals [Ref P, 1] compare P with the
+    strings "true" and "1", so they are two Fn::Equals with two solver
+    variables (True == 1 in Python, so the hashes must tell them apart)."""
+    conditions = Conditions.create_from_instance(
+        {
+            "C0": {"Fn::Equals": [{"Ref": "P0"}, True]},
+            "T": {"Fn::Not": [{"Fn::Equals": [{"Ref": "P0"}, 1]}]},
+        },
+        {},
+        {},
+    )
+    hashes = {
+        eql.hash
+        for condition in conditions.conditions.values()
+        for eql in condition.equals
+    }
+    assert len(hashes) == 2
+    # P0 = "true" satisfies both
+    evolved = conditions.evolve({"C0": True, "T": True})
+    assert evolved.status == {"C0": True, "T": True}
+    # P0 = "1" satisfies neither; the two equals are still exclusive
+    with pytest.raises(Unsatisfiable):
+        conditions.evolve({"C0": True, "T": False})

@@ -24,8 +24,14 @@ class ObjectEncoder(json.JSONEncoder):
 # Convert object to a hashable representation
 def _make_hashable(obj: Any) -> Any:  # type: ignore # Actual return is Hashable but mypy can't verify
     """Convert an object to a hashable representation"""
+    if isinstance(obj, bool):
+        # Tag booleans with their type: ``True == 1`` and ``False == 0`` in
+        # Python, so an untagged bool shares the cache key, and so the hash,
+        # of the integer. CloudFormation compares ``true`` and ``1`` as the
+        # strings "true" and "1", which differ, so the two must hash apart.
+        return (bool, obj)
     # Fast path for already hashable types
-    if isinstance(obj, (str, int, float, bool, type(None))):
+    if isinstance(obj, (str, int, float, type(None))):
         return obj
 
     if isinstance(obj, dict):
@@ -65,8 +71,9 @@ def get_hash(o: Any) -> str:
     This ensures that identical content always produces the same hash,
     regardless of object identity.
     """
-    # For simple hashable types, use direct hashing
-    if isinstance(o, (str, int, float, bool, type(None))):
+    # For simple hashable types, use direct hashing (bools are tagged by
+    # _make_hashable so they do not share the cache key of 1 and 0)
+    if isinstance(o, (str, int, float, type(None))) and not isinstance(o, bool):
         return _cached_hash(o)
 
     # Convert to hashable and compute hash

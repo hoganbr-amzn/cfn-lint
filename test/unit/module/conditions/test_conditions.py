@@ -535,3 +535,29 @@ class TestConditions(TestCase):
                 {"IsA": False, "IsB": False},
             ],
         )
+
+    def test_true_and_one_are_different_equals(self):
+        """Fn::Equals [Ref P, true] and Fn::Equals [Ref P, 1] compare P with
+        the strings "true" and "1", so they are two Fn::Equals that can be
+        true in different scenarios (True == 1 in Python, so the hashes must
+        tell them apart)."""
+        cfn = Template(
+            "",
+            {
+                "Parameters": {"P0": {"Type": "String"}},
+                "Conditions": {
+                    "IsTrue": {"Fn::Equals": [{"Ref": "P0"}, True]},
+                    "IsOne": {"Fn::Equals": [{"Ref": "P0"}, 1]},
+                },
+            },
+        )
+        # P0 = "true", P0 = "1" and anything else: three scenarios, not two
+        self.assertEqual(
+            list(cfn.conditions.build_scenarios({"IsOne": None, "IsTrue": None})),
+            [
+                {"IsOne": True, "IsTrue": False},
+                {"IsOne": False, "IsTrue": True},
+                {"IsOne": False, "IsTrue": False},
+            ],
+        )
+        self.assertFalse(cfn.conditions.check_implies({"IsTrue": True}, "IsOne"))

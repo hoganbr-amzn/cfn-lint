@@ -68,8 +68,25 @@ class TestUtils(unittest.TestCase):
         self.assertEqual(_make_hashable("string"), "string")
         self.assertEqual(_make_hashable(123), 123)
         self.assertEqual(_make_hashable(123.45), 123.45)
-        self.assertEqual(_make_hashable(True), True)
+        self.assertEqual(_make_hashable(True), (bool, True))
         self.assertEqual(_make_hashable(None), None)
+
+    def test_booleans_hash_apart_from_integers(self):
+        """True == 1 and False == 0 in Python, so an lru_cache keyed by the
+        hashable form returned the first caller's digest for both. CloudFormation
+        compares true and 1 as the strings "true" and "1", which differ."""
+        for a, b in ((True, 1), (False, 0)):
+            self.assertNotEqual(get_hash(a), get_hash(b))
+            self.assertNotEqual(get_hash(b), get_hash(a))
+            self.assertNotEqual(
+                get_hash([{"Ref": "P"}, a]), get_hash([{"Ref": "P"}, b])
+            )
+            self.assertNotEqual(
+                get_hash([{"Ref": "P"}, b]), get_hash([{"Ref": "P"}, a])
+            )
+        # the same value still hashes the same, whatever was asked first
+        self.assertEqual(get_hash([{"Ref": "P"}, True]), get_hash([{"Ref": "P"}, True]))
+        self.assertEqual(get_hash(1), get_hash(1))
 
     def test_make_hashable_dict(self):
         """Test _make_hashable with dictionaries"""
