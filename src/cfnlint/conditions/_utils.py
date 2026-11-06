@@ -100,6 +100,16 @@ def add_equivalence(cnf: EncodedCNF, symbol: Boolean, expr: Boolean) -> None:
         cnf.add_prop(Equivalent(symbol, literal))
 
 
+def add_constraint(cnf: EncodedCNF, expr: Boolean) -> None:
+    """Add ``expr`` to ``cnf`` as a constraint without exponential growth.
+
+    Like ``add_equivalence`` this gives every And/Or subterm an auxiliary
+    variable, so an Or of n Ands costs a linear number of clauses rather than
+    the 2^n of sympy's distributive conversion.
+    """
+    cnf.add_prop(_tseitin(cnf, expr, {}))
+
+
 def _tseitin(
     cnf: EncodedCNF, expr: Any, cache: dict[Any, Any], root: Any = None
 ) -> Any:

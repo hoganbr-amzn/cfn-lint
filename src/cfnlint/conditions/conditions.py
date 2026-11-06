@@ -20,7 +20,7 @@ from cfnlint.conditions._condition import ConditionNamed, _Memo
 from cfnlint.conditions._equals import Equal, EqualParameter
 from cfnlint.conditions._errors import UnknownSatisfisfaction
 from cfnlint.conditions._rule import Rule
-from cfnlint.conditions._utils import add_equivalence, get_hash
+from cfnlint.conditions._utils import add_constraint, add_equivalence, get_hash
 from cfnlint.helpers import get_partition
 
 LOGGER = logging.getLogger(__name__)
@@ -215,7 +215,7 @@ class Conditions:
         equal_vars.update(cond_symbols)
 
         for rule in self._rules:
-            cnf.add_prop(rule.build_cnf(equal_vars))
+            add_constraint(cnf, rule.build_cnf(equal_vars))
 
         return (cnf, equal_vars)
 
