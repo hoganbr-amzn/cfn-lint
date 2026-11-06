@@ -11,17 +11,19 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Iterator
 
-from sympy import And, Implies, Not, Or, Symbol
-from sympy.assumptions.cnf import EncodedCNF
-
-from cfnlint.conditions._solver import PinSolver
-from cfnlint.conditions._utils import (
+from cfnlint.conditions._boolean import (
+    And,
+    Boolean,
+    ClauseSet,
+    Not,
+    Or,
+    Symbol,
     add_at_most_one,
     add_constraint,
     add_equivalence,
-    cfn_string,
-    get_hash,
 )
+from cfnlint.conditions._solver import PinSolver
+from cfnlint.conditions._utils import cfn_string, get_hash
 from cfnlint.context.conditions._condition import Condition, ConditionMemo
 from cfnlint.context.conditions._equals import Equal
 from cfnlint.context.conditions._utils import (
@@ -72,7 +74,7 @@ _EVOLVED_MAX = 65536
 class Conditions:
     conditions: Mapping[str, Condition] = field(init=True, default_factory=dict)
     # The template's condition definitions and parameter constraints.
-    _base_cnf: EncodedCNF = field(init=True, default_factory=EncodedCNF, compare=False)
+    _base_cnf: ClauseSet = field(init=True, default_factory=ClauseSet, compare=False)
     # Every pinned condition, including those assumed by scenario enumeration.
     _pins: frozenset[tuple[str, bool]] = field(
         init=True, default_factory=frozenset, compare=False
@@ -128,20 +130,20 @@ class Conditions:
             object.__setattr__(self, "_solver", PinSolver(self._base_cnf))
 
     @property
-    def cnf(self) -> EncodedCNF:
+    def cnf(self) -> ClauseSet:
         """The template's condition clauses plus every pin, as a new copy."""
         return self._cnf_with(self._pins)
 
     @property
-    def hard_cnf(self) -> EncodedCNF:
+    def hard_cnf(self) -> ClauseSet:
         """The template's condition clauses plus the hard pins, as a new copy."""
         return self._cnf_with(self._hard_pins)
 
-    def _cnf_with(self, pins: frozenset[tuple[str, bool]]) -> EncodedCNF:
+    def _cnf_with(self, pins: frozenset[tuple[str, bool]]) -> ClauseSet:
         cnf = self._base_cnf.copy()
         for name, value in sorted(pins):
             sym = self._condition_symbols[name]
-            cnf.add_prop(sym if value else Not(sym))
+            cnf.add_clause([sym if value else Not(sym)])
         return cnf
 
     def _is_satisfiable(self, pins: frozenset[tuple[str, bool]]) -> bool:
@@ -164,7 +166,7 @@ class Conditions:
         for k, v in conditions.items():
             if not isinstance(k, str):
                 # Condition logical IDs must be strings (rule E8001 reports
-                # non-string names).  Skip them here so the sympy Symbol
+                # non-string names).  Skip them here so the Symbol
                 # table below never receives a non-string name, which would
                 # raise TypeError before any rule gets to run.
                 continue
@@ -183,8 +185,8 @@ class Conditions:
                     {"Fn::Equals": [None, None]}, conditions
                 )
 
-        # Build EncodedCNF with a Symbol per condition name
-        cnf = EncodedCNF()
+        # Build the clause set with a Symbol per condition name
+        cnf = ClauseSet()
         condition_symbols: dict[str, Symbol] = {}
         for name, cond in obj.items():
             sym = Symbol(name)
@@ -197,7 +199,7 @@ class Conditions:
         # A rule that uses anything but condition functions is left out.
         # Work on a copy: building an Fn::Equals sorts its list in place, and
         # W8003 reports the Rules section's own text.
-        rule_exprs: list[Any] = []
+        rule_exprs: list[Boolean] = []
         rule_conditions: list[Condition] = []
         for rule in deepcopy(rules).values() if isinstance(rules, dict) else []:
             try:
@@ -205,13 +207,13 @@ class Conditions:
                     Condition.create_from_instance(a["Assert"], conditions, memo)
                     for a in rule["Assertions"]
                 ]
-                expr = And(*[c.cnf for c in parts])
+                expr: Boolean = And(*[c.cnf for c in parts])
                 if rule.get("RuleCondition"):
                     when = Condition.create_from_instance(
                         rule["RuleCondition"], conditions, memo
                     )
                     parts.append(when)
-                    expr = Implies(when.cnf, expr)
+                    expr = Or(Not(when.cnf), expr)  # RuleCondition -> Assertions
             except (ValueError, KeyError, TypeError, AttributeError):
                 continue
             rule_conditions.extend(parts)
@@ -230,7 +232,7 @@ class Conditions:
         # cannot both be true. Previously this constraint was only added
         # inside the AllowedValues loop below, so plain parameters and
         # pseudo-parameters never got it (issue #4799).
-        equals_by_ref: dict[str, dict[str, list[Symbol]]] = {}
+        equals_by_ref: dict[str, dict[str, list[Boolean]]] = {}
         for i in distinct_equals.values():
             if not isinstance(i.left.instance, str):
                 continue
@@ -248,7 +250,7 @@ class Conditions:
                 for _, other_symbols in values[n + 1 :]:
                     for a in symbols:
                         for b in other_symbols:
-                            cnf.add_prop(~(a & b))
+                            cnf.add_clause([Not(a), Not(b)])
 
         # Add parameter AllowedValues constraints
         for p_k, p_v in parameters.items():
@@ -258,7 +260,7 @@ class Conditions:
             if isinstance(allowed_values, list):
                 allowed_values = [cfn_string(v) for v in allowed_values]
             p_hash = get_hash({"Ref": p_k})
-            equals_cnfs: list[Symbol] = []
+            equals_cnfs: list[Boolean] = []
             for i in distinct_equals.values():
                 if i.right.hash == p_hash:
                     if not isinstance(i.left.instance, str):
@@ -268,7 +270,7 @@ class Conditions:
                         allowed_values.remove(i.left.instance)
 
             if not allowed_values and equals_cnfs:
-                cnf.add_prop(Or(*equals_cnfs))
+                cnf.add_clause(equals_cnfs)
 
         for expr in rule_exprs:
             add_constraint(cnf, expr)

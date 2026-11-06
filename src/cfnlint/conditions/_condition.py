@@ -7,9 +7,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, Mapping, Sequence, Union
 
-from sympy import And, Not, Or, Symbol
-from sympy.logic.boolalg import BooleanFunction, BooleanTrue
-
+from cfnlint.conditions._boolean import And, Boolean, BooleanTrue, Not, Or, Symbol
 from cfnlint.conditions._equals import Equal
 from cfnlint.helpers import FUNCTION_CONDITIONS
 
@@ -80,15 +78,15 @@ class Condition:
             return self._condition.equals
         return []
 
-    def build_cnf(self, params: dict[str, Symbol]) -> BooleanFunction | Symbol | None:
-        """Build a SymPy CNF based on the provided params
+    def build_cnf(self, params: dict[str, Symbol]) -> Boolean:
+        """Build the boolean expression of the condition over ``params``
 
         Args:
-            params dict[str, Symbol]: params is a dict that represents
-                    the hash of an Equal and the SymPy Symbols
+            params dict[str, Symbol]: the hash of an Equal, or a condition
+                    name, to the Symbol or constant standing for it
 
         Returns:
-            Any: Any number of different SymPy CNF clauses
+            Boolean: the expression
         """
         if self._condition:
             return self._condition.build_cnf(params)
@@ -152,13 +150,13 @@ class ConditionAnd(ConditionList):
         super().__init__(conditions, all_conditions, memo)
         self._prefix_path = "Fn::And"
 
-    def build_cnf(self, params: dict[str, Symbol]) -> BooleanFunction:
-        """Build a SymPy CNF solver based on the provided params
+    def build_cnf(self, params: dict[str, Symbol]) -> Boolean:
+        """Build the And of the child conditions over ``params``
         Args:
-            params dict[str, Symbol]: params is a dict that represents
-                    the hash of an Equal and the SymPy Symbols
+            params dict[str, Symbol]: the hash of an Equal, or a condition
+                    name, to the Symbol or constant standing for it
         Returns:
-            BooleanFunction: An And SymPy BooleanFunction
+            Boolean: the And, or the single child or a constant it folds to
         """
         conditions: list[Any] = []
         for child in self._conditions:
@@ -185,13 +183,13 @@ class ConditionNot(ConditionList):
         if len(conditions) != 1:
             raise ValueError("Condition length must be 1")
 
-    def build_cnf(self, params: dict[str, Symbol]) -> BooleanFunction:
-        """Build a SymPy CNF solver based on the provided params
+    def build_cnf(self, params: dict[str, Symbol]) -> Boolean:
+        """Build the negation of the child condition over ``params``
         Args:
-            params dict[str, Symbol]: params is a dict that represents
-                    the hash of an Equal and the SymPy Symbol
+            params dict[str, Symbol]: the hash of an Equal, or a condition
+                    name, to the Symbol or constant standing for it
         Returns:
-            BooleanFunction: A Not SymPy BooleanFunction
+            Boolean: the Not, or the constant it folds to
         """
         return Not(self._conditions[0].build_cnf(params))
 
@@ -212,13 +210,13 @@ class ConditionOr(ConditionList):
         super().__init__(conditions, all_conditions, memo)
         self._prefix_path = "Fn::Or"
 
-    def build_cnf(self, params: dict[str, Symbol]) -> BooleanFunction:
-        """Build a SymPy CNF solver based on the provided params
+    def build_cnf(self, params: dict[str, Symbol]) -> Boolean:
+        """Build the Or of the child conditions over ``params``
         Args:
-            params dict[str, Symbol]: params is a dict that represents
-                    the hash of an Equal and the SymPy Symbols
+            params dict[str, Symbol]: the hash of an Equal, or a condition
+                    name, to the Symbol or constant standing for it
         Returns:
-            BooleanFunction: An Or SymPy BooleanFunction
+            Boolean: the Or, or the single child or a constant it folds to
         """
         conditions: list[Any] = []
         for child in self._conditions:
@@ -288,32 +286,12 @@ class ConditionNamed(Condition):
             self._equals = super().equals
         return self._equals
 
-    def build_true_cnf(self, params: dict[str, Symbol]) -> Any:
-        """Build a SymPy CNF for a True based scenario
-        Args:
-            params dict[str, Symbol]: params is a dict that represents
-                    the hash of an Equal and the SymPy Symbols
-        Returns:
-            Any: A SymPy CNF clause
-        """
+    def build_cnf(self, params: dict[str, Symbol]) -> Boolean:
+        """The Symbol standing for this condition when ``params`` has one,
+        otherwise its expression."""
         if self._name in params:
             return params[self._name]
         return super().build_cnf(params)
-
-    def build_cnf(self, params: dict[str, Symbol]) -> Any:
-        if self._name in params:
-            return params[self._name]
-        return super().build_cnf(params)
-
-    def build_false_cnf(self, params: dict[str, Symbol]) -> Any:
-        """Build a SymPy CNF for a False based scenario
-        Args:
-            params dict[str, Symbol]: params is a dict that represents
-                    the hash of an Equal and the SymPy CNF Symbols
-        Returns:
-            Any: A Not SymPy CNF clause
-        """
-        return Not(self.build_true_cnf(params))
 
     def test(self, scenarios: Mapping[str, str]) -> bool:
         """Test a condition based on a scenario"""

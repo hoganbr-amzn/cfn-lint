@@ -9,9 +9,7 @@ from dataclasses import dataclass, field
 from functools import cached_property
 from typing import Any
 
-from sympy import And, Not, Or, Symbol
-from sympy.logic.boolalg import BooleanFunction
-
+from cfnlint.conditions._boolean import And, Boolean, Not, Or, Symbol, true
 from cfnlint.conditions._utils import get_hash
 from cfnlint.context.conditions._equals import Equal
 from cfnlint.helpers import FUNCTION_CONDITIONS, is_function
@@ -39,7 +37,7 @@ class Condition:
 
     fn_equals: Equal | None = field(init=True, default=None)
     condition: list["Condition"] | "Condition" | None = field(init=True, default=None)
-    cnf: BooleanFunction = field(init=True, default_factory=BooleanFunction)
+    cnf: Boolean = field(init=True, default=true)
 
     @classmethod
     def create_from_instance(
@@ -71,12 +69,12 @@ class Condition:
                     Condition.create_from_instance(v, all_conditions, memo)
                 )
 
-            cnf = None
+            cnf: Boolean
             if fn_k == "Fn::And":
                 cnf = And(*[c.cnf for c in condition])
             elif fn_k == "Fn::Or":
                 cnf = Or(*[c.cnf for c in condition])
-            elif fn_k == "Fn::Not":
+            else:  # Fn::Not
                 if len(condition) != 1:
                     raise ValueError(
                         f"Fn::Not expects only one condition, got {len(condition)}"

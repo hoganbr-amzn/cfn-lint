@@ -8,10 +8,10 @@ import json
 from unittest.mock import patch
 
 import pytest
-from sympy import Not, Symbol
 from sympy.logic.inference import satisfiable
 
 from cfnlint.api import ManualArgs, lint
+from cfnlint.conditions._boolean import Not, Symbol
 from cfnlint.context import create_context_for_template
 from cfnlint.context.conditions._condition import Condition
 from cfnlint.context.conditions._conditions import Conditions, _Pinned
@@ -616,7 +616,7 @@ def test_cnf_is_the_template_clauses_plus_one_per_pin():
 
     # Each access is a new copy, so changing one does not reach later answers:
     # this evolve would raise Unsatisfiable if Not(IsProd) had been kept.
-    pinned.cnf.add_prop(Not(Symbol("IsProd")))
+    pinned.cnf.add_clause([Not(Symbol("IsProd"))])
     assert len(pinned.cnf.data) == clauses + 2
     pinned.evolve({"IsAi": True})
 

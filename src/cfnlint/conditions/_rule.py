@@ -8,9 +8,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict
 
-from sympy import And, Implies, Symbol
-from sympy.logic.boolalg import BooleanFunction, BooleanTrue
-
+from cfnlint.conditions._boolean import And, Boolean, BooleanTrue, Not, Or, Symbol
 from cfnlint.conditions._condition import (
     ConditionAnd,
     ConditionList,
@@ -60,7 +58,7 @@ class _Assertion:
         else:
             raise ValueError("Condition value must be an object of length 1")
 
-    def build_cnf(self, params: dict[str, Symbol]) -> BooleanFunction | Symbol | None:
+    def build_cnf(self, params: dict[str, Symbol]) -> Boolean | None:
         if self._fn_equals:
             try:
                 return self._fn_equals.build_cnf(params)
@@ -96,7 +94,7 @@ class _Assertions:
             assert_ = assertion.get("Assert", {})
             self._assertions.append(_Assertion(assert_, all_conditions, memo))
 
-    def build_cnf(self, params: dict[str, Symbol]) -> BooleanFunction | Symbol | None:
+    def build_cnf(self, params: dict[str, Symbol]) -> Boolean | None:
         assertions = []
         for assertion in self._assertions:
             assertions.append(assertion.build_cnf(params))
@@ -150,11 +148,12 @@ class Rule:
             result.extend(self._assertions.equals)
         return result
 
-    def build_cnf(self, params: dict[str, Symbol]) -> BooleanFunction | Symbol | None:
+    def build_cnf(self, params: dict[str, Symbol]) -> Boolean | None:
         if self._assertions:
             if self._condition:
-                return Implies(
-                    self._condition.build_cnf(params),
+                # RuleCondition -> Assertions
+                return Or(
+                    Not(self._condition.build_cnf(params)),
                     self._assertions.build_cnf(params),
                 )
             return self._assertions.build_cnf(params)

@@ -10,22 +10,21 @@ import traceback
 from functools import lru_cache
 from typing import Any, Iterable, Iterator, Set, Tuple
 
-from sympy import And, Not, Symbol
-from sympy.assumptions.cnf import EncodedCNF
-from sympy.logic.boolalg import BooleanFalse, BooleanTrue
-
+from cfnlint.conditions._boolean import (
+    BooleanFalse,
+    BooleanTrue,
+    ClauseSet,
+    Symbol,
+    add_at_most_one,
+    add_constraint,
+    add_equivalence,
+)
 from cfnlint.conditions._condition import ConditionMemo, ConditionNamed
 from cfnlint.conditions._equals import Equal, EqualParameter
 from cfnlint.conditions._errors import UnknownSatisfisfaction
 from cfnlint.conditions._rule import Rule
 from cfnlint.conditions._solver import PinSolver
-from cfnlint.conditions._utils import (
-    add_at_most_one,
-    add_constraint,
-    add_equivalence,
-    cfn_string,
-    get_hash,
-)
+from cfnlint.conditions._utils import cfn_string, get_hash
 from cfnlint.helpers import get_partition
 
 LOGGER = logging.getLogger(__name__)
@@ -165,11 +164,11 @@ class Conditions:
 
     def _build_cnf(
         self, condition_names: list[str]
-    ) -> Tuple[EncodedCNF, dict[str, Any]]:
-        cnf = EncodedCNF()
+    ) -> Tuple[ClauseSet, dict[str, Any]]:
+        cnf = ClauseSet()
 
-        # build parameters and equals into solver
-        equal_vars: dict[str, Symbol | BooleanFalse | BooleanTrue] = {}
+        # Fn::Equals hash -> its Symbol, or a constant for a static one
+        equal_vars: dict[str, Any] = {}
 
         equals: dict[str, Equal] = {}
 
@@ -237,19 +236,14 @@ class Conditions:
                 # means the list is empty and all allowed values are validated
                 # so not all equals can be false
                 if not allowed_value:
-                    # one And over every Not(equal) instead of a chain of
-                    # binary Ands, each re-flattening the one before
+                    # at least one of the Fn::Equals on the parameter holds
                     parts = []
                     for _, equal_1 in equals.items():
                         for param in equal_1.parameters:
                             if allowed_hash == param.hash:
-                                parts.append(Not(equal_vars[equal_1.hash]))
-                    # Need to make sure they aren't all False
-                    # So Not(Not(Equal1) & Not(Equal2))
-                    # When Equal1 False and Equal2 False
-                    # Not(True & True) = False allowing this not to happen
+                                parts.append(equal_vars[equal_1.hash])
                     if parts:
-                        cnf.add_prop(Not(And(*parts)))
+                        cnf.add_clause(parts)
 
         # Create a Symbol per condition name and add implication constraints
         # so that build_true_cnf/build_false_cnf can use the simple Symbol
@@ -276,7 +270,9 @@ class Conditions:
         equal_vars.update(cond_symbols)
 
         for rule in self._rules:
-            add_constraint(cnf, rule.build_cnf(equal_vars))
+            rule_expr = rule.build_cnf(equal_vars)
+            if rule_expr is not None:
+                add_constraint(cnf, rule_expr)
 
         return (cnf, equal_vars)
 

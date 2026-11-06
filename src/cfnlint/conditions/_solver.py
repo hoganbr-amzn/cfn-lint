@@ -12,6 +12,8 @@ from typing import Any, Callable, Iterable, Iterator
 from sympy.assumptions.cnf import EncodedCNF
 from sympy.logic.inference import satisfiable
 
+from cfnlint.conditions._boolean import ClauseSet
+
 
 def alternate_ends(
     walk: Callable[[bool], Iterator[tuple[bool, ...]]], limit: int
@@ -78,7 +80,7 @@ class PinSolver:
     touched ones are solved together with the pins.
     """
 
-    def __init__(self, cnf: EncodedCNF) -> None:
+    def __init__(self, cnf: ClauseSet) -> None:
         self._cnf = cnf
         self._answers: dict[frozenset[tuple[int, bool]], bool] = {}
         self._models: dict[Any, tuple[list[tuple[bool, ...]], bool]] = {}
