@@ -20,7 +20,12 @@ from cfnlint.conditions._condition import ConditionNamed, _Memo
 from cfnlint.conditions._equals import Equal, EqualParameter
 from cfnlint.conditions._errors import UnknownSatisfisfaction
 from cfnlint.conditions._rule import Rule
-from cfnlint.conditions._utils import add_constraint, add_equivalence, get_hash
+from cfnlint.conditions._utils import (
+    add_at_most_one,
+    add_constraint,
+    add_equivalence,
+    get_hash,
+)
 from cfnlint.helpers import get_partition
 
 LOGGER = logging.getLogger(__name__)
@@ -118,6 +123,9 @@ class Conditions:
 
         equals: dict[str, Equal] = {}
 
+        # Fn::Equals hash -> hashes of the parameters it compares
+        by_parameter: dict[str, list[str]] = {}
+
         def _build_equal_vars(c_equals: list[Equal]):
             for c_equal in c_equals:
                 if c_equal.hash in equal_vars:
@@ -130,16 +138,8 @@ class Conditions:
                         equal_vars[c_equal.hash] = BooleanFalse()
                 else:
                     equal_vars[c_equal.hash] = Symbol(c_equal.hash)
-                    # See if parameter in this equals is the same as another equals
-                    for param in c_equal.parameters:
-                        for e_hash, e_equals in equals.items():
-                            if param in e_equals.parameters:
-                                # equivalent to NAND logic. We want to make
-                                # sure that both equals are not both True
-                                # at the same time
-                                cnf.add_prop(
-                                    ~(equal_vars[c_equal.hash] & equal_vars[e_hash])
-                                )
+                for param in c_equal.parameters:
+                    by_parameter.setdefault(param.hash, []).append(c_equal.hash)
                 equals[c_equal.hash] = c_equal
 
         for rule in self._rules:
@@ -147,6 +147,18 @@ class Conditions:
 
         for condition_name in condition_names:
             _build_equal_vars(self._conditions[condition_name].equals)
+
+        # Two Fn::Equals that compare the same parameter cannot both be
+        # true (NAND). A static Fn::Equals that is true forces the others
+        # false; a false one constrains nothing.
+        for hashes in by_parameter.values():
+            members = [equal_vars[h] for h in hashes]
+            symbols = [m for m in members if isinstance(m, Symbol)]
+            if any(isinstance(m, BooleanTrue) for m in members):
+                for sym in symbols:
+                    cnf.add_prop(Not(sym))
+            else:
+                add_at_most_one(cnf, symbols)
 
         # Determine if a set of conditions can never be all false
         allowed_values = {k: list(v) for k, v in self._parameters.items()}

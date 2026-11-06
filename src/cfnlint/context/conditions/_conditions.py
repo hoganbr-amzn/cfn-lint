@@ -13,7 +13,7 @@ from sympy import Not, Or, Symbol
 from sympy.assumptions.cnf import EncodedCNF
 from sympy.logic.inference import satisfiable
 
-from cfnlint.conditions._utils import add_equivalence, get_hash
+from cfnlint.conditions._utils import add_at_most_one, add_equivalence, get_hash
 from cfnlint.context.conditions._condition import Condition, ConditionMemo
 from cfnlint.context.conditions._equals import Equal
 from cfnlint.context.conditions._utils import (
@@ -130,17 +130,25 @@ class Conditions:
         # cannot both be true. Previously this constraint was only added
         # inside the AllowedValues loop below, so plain parameters and
         # pseudo-parameters never got it (issue #4799).
-        equals_by_ref: dict[str, list[tuple[Symbol, str]]] = {}
+        equals_by_ref: dict[str, dict[str, list[Symbol]]] = {}
         for i in distinct_equals.values():
             if not isinstance(i.left.instance, str):
                 continue
             if not isinstance(i.right.instance, dict):
                 continue
-            seen = equals_by_ref.setdefault(i.right.hash, [])
-            for prev_cnf, prev_val in seen:
-                if prev_val != i.left.instance:
-                    cnf.add_prop(~(i.cnf & prev_cnf))
-            seen.append((i.cnf, i.left.instance))
+            equals_by_ref.setdefault(i.right.hash, {}).setdefault(
+                i.left.instance, []
+            ).append(i.cnf)
+        for by_value in equals_by_ref.values():
+            if all(len(symbols) == 1 for symbols in by_value.values()):
+                add_at_most_one(cnf, [symbols[0] for symbols in by_value.values()])
+                continue
+            values = list(by_value.items())
+            for n, (_, symbols) in enumerate(values):
+                for _, other_symbols in values[n + 1 :]:
+                    for a in symbols:
+                        for b in other_symbols:
+                            cnf.add_prop(~(a & b))
 
         # Add parameter AllowedValues constraints
         for p_k, p_v in parameters.items():
