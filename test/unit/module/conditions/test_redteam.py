@@ -131,10 +131,12 @@ class TestPointBudget(TestCase):
             self.skipTest("point engine not selected")
         self._budget = points.STEP_BUDGET
         self._trips = points.MAX_TRIPS
+        self._component = points.COMPONENT_BUDGET
 
     def tearDown(self):
         points.STEP_BUDGET = self._budget
         points.MAX_TRIPS = self._trips
+        points.COMPONENT_BUDGET = self._component
 
     @staticmethod
     def _ask(cfn, pins):
@@ -165,6 +167,27 @@ class TestPointBudget(TestCase):
         self.assertEqual(points._STATS["fallbacks"], fallbacks)
         (component,) = cfn.conditions._solver._components
         self.assertEqual(component.route, "pp")
+
+    def test_component_that_searches_a_lot_without_tripping_goes_to_sat(self):
+        """Many searches each under the budget cost as much as trips; past
+        COMPONENT_BUDGET node evaluations in all, the component is SAT."""
+        points.COMPONENT_BUDGET = 3000
+        cfn = Template("", budget_fallback(8), ["us-east-1"])
+        solver = cfn.conditions._solver
+        fallbacks = points._STATS["fallbacks"]
+        self.assertTrue(solver.satisfiable([]))
+        (component,) = solver._components
+        asked = 0
+        while component.route == "pp" and asked < 8:
+            self.assertFalse(self._ask(cfn, [(f"H{asked}", True), (f"E{asked}", False)]))
+            asked += 1
+        self.assertGreater(component.searched, 3000)
+        self.assertLess(asked, 8)
+        self.assertFalse(self._ask(cfn, [(f"H{asked}", True), (f"E{asked}", False)]))
+        self.assertEqual((component.route, component.why), ("sat", "searched"))
+        self.assertEqual(points._STATS["fallbacks"], fallbacks)
+        for j in range(8):
+            self.assertTrue(self._ask(cfn, [(f"H{j}", True), (f"E{j}", True)]))
 
     def test_after_max_trips_every_component_goes_to_sat(self):
         points.STEP_BUDGET = 500

@@ -67,6 +67,10 @@ MAX_POINTS = int(os.environ.get("CFNLINT_PP_MAX_POINTS", "1048576"))
 STEP_BUDGET = int(os.environ.get("CFNLINT_PP_BUDGET", "200000"))
 # after this many searches ran out of budget, the rest of the lint is SAT
 MAX_TRIPS = int(os.environ.get("CFNLINT_PP_MAX_TRIPS", "10"))
+# node evaluations one component may spend on searches in all (about 0.5 s)
+# before its questions go to SAT: many searches each just under the budget
+# cost as much as trips
+COMPONENT_BUDGET = int(os.environ.get("CFNLINT_PP_COMPONENT_BUDGET", "2000000"))
 MAX_REFS = 400  # recursion depth guard
 # definitions evaluated recursively along Condition: references before the
 # evaluation switches to an explicit stack
@@ -240,6 +244,7 @@ class _Component:
         # node evaluations spent projecting per-question point sets for a
         # component too large for a table
         self.projected = 0
+        self.searched = 0  # node evaluations spent in searches, in all
 
 
 class PointSolver:
@@ -549,6 +554,8 @@ class PointSolver:
             # the lint has spent its share of point searches that led
             # nowhere; every component still on points is answered by SAT
             c.route, c.why = "sat", "trips"
+        elif c.route == "pp" and c.searched > COMPONENT_BUDGET:
+            c.route, c.why = "sat", "searched"
         if c.route == "sat":
             _STATS["sat_queries"] += 1
             ans = self._sat(c.cnf_indices, pins)
@@ -752,7 +759,6 @@ class PointSolver:
                 # the budget is in node evaluations, so a step that walks a
                 # wide condition costs what it really costs
                 if self._work > limit:
-                    _STATS["pp_steps"] += self._work - start
                     raise _Budget()
                 if ok:
                     if und == 0:
@@ -770,10 +776,14 @@ class PointSolver:
             vals.pop(r, None)
             return False
 
-        res = descend(0, undecided)
-        _STATS["pp_steps"] += self._work - start
-        if self._work - start > _STATS["pp_max"]:
-            _STATS["pp_max"] = self._work - start
+        try:
+            res = descend(0, undecided)
+        finally:
+            spent = self._work - start
+            c.searched += spent
+            _STATS["pp_steps"] += spent
+            if spent > _STATS["pp_max"]:
+                _STATS["pp_max"] = spent
         return res
 
     def _node_size(self, node) -> int:
