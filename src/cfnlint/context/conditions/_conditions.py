@@ -61,6 +61,17 @@ class Conditions:
         init=True, default=None, compare=False, repr=False
     )
     _max_scenarios: int = field(init=False, default=128)
+    # (pins, hard pins) -> the Conditions evolve returns for them, and
+    # (name, status) -> that Condition with the status.  Both depend only on
+    # the template, so the template's own Conditions keeps them for every
+    # Conditions evolved from it.
+    _evolved: dict[
+        tuple[frozenset[tuple[str, bool]], frozenset[tuple[str, bool]]],
+        "Conditions",
+    ] = field(init=True, default_factory=dict, compare=False, repr=False)
+    _with_status: dict[tuple[str, bool | None], Condition] = field(
+        init=True, default_factory=dict, compare=False, repr=False
+    )
 
     def __post_init__(self) -> None:
         if self._solver is None:
@@ -253,27 +264,27 @@ class Conditions:
         if all_same:
             return self
 
-        conditions: dict[str, Condition] = {}
         pins: set[tuple[str, bool]] = set()
         hard_pins = set(self._hard_pins)
+        statuses: dict[str, bool | None] = {}
         for condition, value in self.conditions.items():
             s = status.get(condition, value.status)
-            try:
-                conditions[condition] = value.evolve(status=s)
-                if s is not None and condition in self._condition_symbols:
-                    pins.add((condition, s))
-                    # Only the conditions being pinned by *this* call, and only
-                    # when they are facts (not enumeration hypotheses), join
-                    # the hard pins.  Conditions carried over from a prior
-                    # evolve are already there if they were facts, and must
-                    # stay out if they were assumptions.
-                    if not assumed and condition in status:
-                        hard_pins.add((condition, s))
-            except ValueError as e:
+            # Condition.evolve refuses to change a status that is set
+            if value.status is not None and s != value.status:
                 raise Unsatisfiable(
                     new_status=status,
                     current_status=self.status,
-                ) from e
+                )
+            statuses[condition] = s
+            if s is not None and condition in self._condition_symbols:
+                pins.add((condition, s))
+                # Only the conditions being pinned by *this* call, and only
+                # when they are facts (not enumeration hypotheses), join
+                # the hard pins.  Conditions carried over from a prior
+                # evolve are already there if they were facts, and must
+                # stay out if they were assumptions.
+                if not assumed and condition in status:
+                    hard_pins.add((condition, s))
 
         new_pins = frozenset(pins)
         if not self._is_satisfiable(new_pins):
@@ -282,14 +293,30 @@ class Conditions:
                 current_status=self.status,
             )
 
-        return cls(
-            conditions=conditions,
-            _base_cnf=self._base_cnf,
-            _pins=new_pins,
-            _hard_pins=frozenset(hard_pins),
-            _condition_symbols=self._condition_symbols,
-            _solver=self._solver,
-        )
+        # The result depends only on the template and the pins: every
+        # condition with a status is pinned, so return the one built before.
+        key = (new_pins, frozenset(hard_pins))
+        evolved = self._evolved.get(key)
+        if evolved is None:
+            conditions: dict[str, Condition] = {}
+            for condition, s in statuses.items():
+                pinned = self._with_status.get((condition, s))
+                if pinned is None:
+                    pinned = self.conditions[condition].evolve(status=s)
+                    self._with_status[(condition, s)] = pinned
+                conditions[condition] = pinned
+            evolved = cls(
+                conditions=conditions,
+                _base_cnf=self._base_cnf,
+                _pins=new_pins,
+                _hard_pins=key[1],
+                _condition_symbols=self._condition_symbols,
+                _solver=self._solver,
+                _evolved=self._evolved,
+                _with_status=self._with_status,
+            )
+            self._evolved[key] = evolved
+        return evolved
 
     def is_reachable(self, name: str, value: bool) -> bool:
         """Return whether ``name`` can take ``value`` given the forced facts.
