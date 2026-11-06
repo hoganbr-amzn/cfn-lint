@@ -23,6 +23,7 @@ from cfnlint.conditions._utils import (
     add_at_most_one,
     add_constraint,
     add_equivalence,
+    cfn_string,
     get_hash,
 )
 from cfnlint.helpers import get_partition
@@ -87,7 +88,9 @@ class Conditions:
             self._parameters[param_hash] = []
             for allowed_value in allowed_values:
                 if isinstance(allowed_value, (str, int, float, bool)):
-                    self._parameters[param_hash].append(get_hash(str(allowed_value)))
+                    self._parameters[param_hash].append(
+                        get_hash(str(cfn_string(allowed_value)))
+                    )
 
     def _init_model(self, cfn: Any) -> None:
         parameters = cfn.template.get("Parameters")
@@ -100,7 +103,9 @@ class Conditions:
             allowed = parameter.get("AllowedValues")
             if allowed and isinstance(allowed, list):
                 values = [
-                    str(v) for v in allowed if isinstance(v, (str, int, float, bool))
+                    str(cfn_string(v))
+                    for v in allowed
+                    if isinstance(v, (str, int, float, bool))
                 ]
                 if values and len(values) == len(allowed):
                     self._model.domains[get_hash({"Ref": name})] = values

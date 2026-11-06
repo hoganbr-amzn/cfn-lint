@@ -13,7 +13,7 @@ from typing import Any
 from sympy import Symbol, false, true
 from sympy.logic.boolalg import BooleanAtom
 
-from cfnlint.conditions._utils import get_hash
+from cfnlint.conditions._utils import cfn_string, get_hash
 from cfnlint.helpers import is_function
 
 LOGGER = logging.getLogger(__name__)
@@ -56,7 +56,7 @@ class EqualParameter:
     @classmethod
     def create_from_instance(cls, instance: Any) -> "EqualParameter":
         if isinstance(instance, (str, bool, int, float)):
-            return cls(instance=str(instance))
+            return cls(instance=str(cfn_string(instance)))
 
         if isinstance(instance, dict):
             return cls(instance=instance)
@@ -93,7 +93,13 @@ class Equal:
         instance.sort(key=_equals_cmp_key)
         left = EqualParameter.create_from_instance(instance[0])
         right = EqualParameter.create_from_instance(instance[1])
-        return cls(instance=instance, left=left, right=right)
+        # hash the literals as CloudFormation compares them, so that
+        # [Ref P, true] and [Ref P, "true"] are one Fn::Equals
+        return cls(
+            instance=[cfn_string(value) for value in instance],
+            left=left,
+            right=right,
+        )
 
     def __post_init__(self):
         object.__setattr__(self, "hash", get_hash(self.instance))

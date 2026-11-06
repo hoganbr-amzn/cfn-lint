@@ -21,6 +21,22 @@ class ObjectEncoder(json.JSONEncoder):
         return o
 
 
+def cfn_string(value: Any) -> Any:
+    """Return a scalar literal as the string CloudFormation compares.
+
+    CloudFormation compares Fn::Equals operands, parameter values and
+    AllowedValues as strings, and writes a template boolean as ``true`` or
+    ``false`` (Python's ``str`` gives ``True``/``False``). Numbers keep
+    Python's ``str`` (``1`` is "1", ``1.0`` is "1.0"). Anything that is not
+    a bool, int or float (strings, dicts, lists, None) is returned unchanged.
+    """
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return str(value)
+    return value
+
+
 # Convert object to a hashable representation
 def _make_hashable(obj: Any) -> Any:  # type: ignore # Actual return is Hashable but mypy can't verify
     """Convert an object to a hashable representation"""

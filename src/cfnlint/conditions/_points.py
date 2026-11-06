@@ -49,6 +49,7 @@ from sympy.logic.boolalg import (
 )
 
 from cfnlint.conditions._solver import PinSolver
+from cfnlint.conditions._utils import cfn_string
 
 ENGINE = os.environ.get("CFNLINT_COND_ENGINE", "hybrid").strip().lower() or "hybrid"
 if ENGINE not in ("hybrid", "pp", "pyinc", "g", "dual"):
@@ -124,22 +125,13 @@ class PointModel:
             self.free_atoms.add(symbol)
 
 
-def cfn_str(value: Any, cfn_bools: bool = False) -> str:
-    """A scalar as a string.  With ``cfn_bools`` a boolean is written the way
-    CloudFormation compares it ("true"/"false"); without, as Python's str()
-    ("True"/"False"), which is what the template-level engine's CNF uses."""
-    if cfn_bools and isinstance(value, bool):
-        return "true" if value else "false"
-    return str(value)
-
-
-def fold(value: Any, mappings: Any, cfn_bools: bool = False) -> str | None:
+def fold(value: Any, mappings: Any) -> str | None:
     """The string value of an Fn::Equals operand that needs no parameter:
-    a scalar, or Fn::Select / Fn::FindInMap / Fn::Join over such values."""
-    if isinstance(value, bool):
-        return cfn_str(value, cfn_bools)
-    if isinstance(value, (str, int, float)):
-        return str(value)
+    a scalar, or Fn::Select / Fn::FindInMap / Fn::Join over such values.
+    Scalars are written as CloudFormation compares them (``cfn_string``:
+    a boolean is "true"/"false"), the same form both engines' CNFs use."""
+    if isinstance(value, (str, int, float, bool)):
+        return str(cfn_string(value))
     if not isinstance(value, dict) or len(value) != 1:
         return None
     k, a = next(iter(value.items()))
@@ -147,16 +139,16 @@ def fold(value: Any, mappings: Any, cfn_bools: bool = False) -> str | None:
         if k == "Fn::Select" and isinstance(a, list) and len(a) == 2:
             i = fold(a[0], mappings)
             if i is not None and isinstance(a[1], list):
-                return fold(a[1][int(i)], mappings, cfn_bools)
+                return fold(a[1][int(i)], mappings)
         if k == "Fn::FindInMap" and isinstance(a, list) and len(a) == 3:
-            m, k1, k2 = (fold(x, mappings, cfn_bools) for x in a)
+            m, k1, k2 = (fold(x, mappings) for x in a)
             if None not in (m, k1, k2) and isinstance(mappings, dict):
                 v = mappings[m][k1][k2]
                 if isinstance(v, (str, int, float, bool)):
-                    return cfn_str(v, cfn_bools)
+                    return str(cfn_string(v))
         if k == "Fn::Join" and isinstance(a, list) and len(a) == 2:
             if isinstance(a[0], str) and isinstance(a[1], list):
-                parts = [fold(x, mappings, cfn_bools) for x in a[1]]
+                parts = [fold(x, mappings) for x in a[1]]
                 if None not in parts:
                     return a[0].join(parts)
     except (KeyError, IndexError, ValueError, TypeError):

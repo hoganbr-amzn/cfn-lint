@@ -12,12 +12,13 @@ from typing import TYPE_CHECKING, Any, Iterator
 from sympy import And, Implies, Not, Or, Symbol
 from sympy.assumptions.cnf import EncodedCNF
 
-from cfnlint.conditions._points import PointModel, cfn_str, fold, make_solver
+from cfnlint.conditions._points import PointModel, fold, make_solver
 from cfnlint.conditions._solver import PinSolver
 from cfnlint.conditions._utils import (
     add_at_most_one,
     add_constraint,
     add_equivalence,
+    cfn_string,
     get_hash,
 )
 from cfnlint.context.conditions._condition import Condition, ConditionMemo
@@ -200,6 +201,8 @@ class Conditions:
             if not p_v.allowed_values:
                 continue
             allowed_values = p_v.allowed_values.copy()
+            if isinstance(allowed_values, list):
+                allowed_values = [cfn_string(v) for v in allowed_values]
             p_hash = get_hash({"Ref": p_k})
             equals_cnfs: list[Symbol] = []
             for i in distinct_equals.values():
@@ -220,16 +223,14 @@ class Conditions:
         for name, cond in obj.items():
             model.defs[condition_symbols[name]] = cond.cnf
 
-        def _term(side, raw):
-            # EqualParameter stringifies a YAML boolean as Python does
-            # ("True"); compare it as CloudFormation does ("true"), the way
-            # the AllowedValues domains below are written (ledger A12)
-            if isinstance(raw, bool):
-                return ("L", cfn_str(raw, cfn_bools=True))
+        def _term(side):
+            # EqualParameter already holds a literal as the string
+            # CloudFormation compares (cfn_string); fold writes folded
+            # intrinsics the same way
             inst = side.instance
             if isinstance(inst, str):
                 return ("L", inst)
-            folded = fold(inst, mappings, cfn_bools=True)
+            folded = fold(inst, mappings)
             if folded is not None:
                 return ("L", folded)
             return ("R", side.hash)
@@ -246,15 +247,14 @@ class Conditions:
                     ref = inst.get("Ref")
                     if isinstance(ref, str) and ref.startswith("AWS::"):
                         model.plain_refs.add(side.hash)
-            raw = i.instance if isinstance(i.instance, list) else [None, None]
-            model.add_atom(i.cnf, _term(i.left, raw[0]), _term(i.right, raw[1]))
+            model.add_atom(i.cnf, _term(i.left), _term(i.right))
         for p_k, p_v in parameters.items():
             av = p_v.allowed_values
             if av and isinstance(av, list) and all(
                 isinstance(v, (str, int, float, bool)) for v in av
             ):
                 model.domains[get_hash({"Ref": p_k})] = [
-                    cfn_str(v, cfn_bools=True) for v in av
+                    str(cfn_string(v)) for v in av
                 ]
         model.constraints.extend(rule_exprs)
 

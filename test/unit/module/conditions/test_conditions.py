@@ -575,3 +575,77 @@ class TestConditions(TestCase):
             ],
         )
         self.assertFalse(cfn.conditions.check_implies({"IsTrue": True}, "IsOne"))
+
+    def test_literals_compare_as_cloudformation_strings(self):
+        """CloudFormation compares Fn::Equals operands as strings and writes a
+        boolean as true/false, so true equals "true" but not "True", 1 equals
+        "1" but not 1.0, and false equals neither 0 nor "False"."""
+        cases = {
+            "BoolTrue": ([True, "true"], True),
+            "BoolCase": ([True, "True"], False),
+            "BoolBool": ([True, True], True),
+            "FalseZero": ([False, 0], False),
+            "FalseStr": ([False, "false"], True),
+            "IntStr": ([1, "1"], True),
+            "IntFloat": ([1, 1.0], False),
+            "FloatStr": ([1.0, "1.0"], True),
+        }
+        cfn = Template(
+            "",
+            {"Conditions": {k: {"Fn::Equals": v} for k, (v, _) in cases.items()}},
+        )
+        for name, (_, expected) in cases.items():
+            (equal,) = cfn.conditions._conditions[name].equals
+            self.assertEqual(equal.is_static, expected, name)
+
+    def test_bool_and_string_literal_are_one_equals(self):
+        """Fn::Equals [Ref P, true] and [Ref P, "true"] are the same comparison."""
+        cfn = Template(
+            "",
+            {
+                "Parameters": {"P": {"Type": "String"}},
+                "Conditions": {
+                    "A": {"Fn::Equals": [{"Ref": "P"}, True]},
+                    "B": {"Fn::Equals": ["true", {"Ref": "P"}]},
+                    "C": {"Fn::Equals": [{"Ref": "P"}, 1]},
+                    "D": {"Fn::Equals": [{"Ref": "P"}, "1"]},
+                },
+            },
+        )
+        (a,) = cfn.conditions._conditions["A"].equals
+        (b,) = cfn.conditions._conditions["B"].equals
+        (c,) = cfn.conditions._conditions["C"].equals
+        (d,) = cfn.conditions._conditions["D"].equals
+        self.assertEqual(a.hash, b.hash)
+        self.assertEqual(c.hash, d.hash)
+        self.assertNotEqual(a.hash, c.hash)
+        self.assertTrue(cfn.conditions.check_implies({"A": True}, "B"))
+        self.assertTrue(cfn.conditions.check_implies({"B": False}, "A") is False)
+
+    def test_allowed_values_compare_as_cloudformation_strings(self):
+        """AllowedValues [true, false] are the strings "true" and "false", so
+        one of P = "true" and P = "false" holds; AllowedValues [1, 2] are "1"
+        and "2"."""
+        cfn = Template(
+            "",
+            {
+                "Parameters": {
+                    "P": {"Type": "String", "AllowedValues": [True, False]},
+                    "N": {"Type": "Number", "AllowedValues": [1, 2]},
+                },
+                "Conditions": {
+                    "T": {"Fn::Equals": [{"Ref": "P"}, "true"]},
+                    "F": {"Fn::Equals": [{"Ref": "P"}, "false"]},
+                    "One": {"Fn::Equals": [{"Ref": "N"}, "1"]},
+                    "Two": {"Fn::Equals": [{"Ref": "N"}, 2]},
+                },
+            },
+        )
+        self.assertEqual(
+            list(cfn.conditions.build_scenarios({"T": None, "F": None})),
+            [{"F": True, "T": False}, {"F": False, "T": True}],
+        )
+        self.assertEqual(
+            list(cfn.conditions.build_scenarios({"One": None, "Two": None})),
+            [{"One": True, "Two": False}, {"One": False, "Two": True}],
+        )
