@@ -793,6 +793,96 @@ def test_static_equals_is_a_constant(equals, always):
     assert cfn.conditions.is_always_true("Static") is always
 
 
+def test_rules_restrict_conditions():
+    """A Rules assertion restricts parameter values for context checks, as it
+    does in the template-level engine."""
+    cfn = Template(
+        "",
+        {
+            "Parameters": {
+                "Env": {"Type": "String", "AllowedValues": ["dev", "prod"]},
+                "Region": {"Type": "String"},
+            },
+            "Rules": {
+                "ProdOnly": {"Assertions": [{"Assert": {"Condition": "IsProd"}}]},
+                "EastWhenProd": {
+                    "RuleCondition": {"Fn::Equals": [{"Ref": "Env"}, "prod"]},
+                    "Assertions": [
+                        {"Assert": {"Fn::Equals": [{"Ref": "Region"}, "east"]}}
+                    ],
+                },
+                "Ignored": {
+                    "Assertions": [
+                        {"Assert": {"Fn::Contains": [["a"], {"Ref": "Env"}]}}
+                    ]
+                },
+            },
+            "Conditions": {
+                "IsProd": {"Fn::Equals": [{"Ref": "Env"}, "prod"]},
+                "IsDev": {"Fn::Equals": [{"Ref": "Env"}, "dev"]},
+                "IsWest": {"Fn::Equals": [{"Ref": "Region"}, "west"]},
+            },
+            "Resources": {},
+        },
+    )
+    conditions = create_context_for_template(cfn).conditions
+    # the template's Rules are read, not reordered
+    assert cfn.template["Rules"]["EastWhenProd"]["RuleCondition"] == {
+        "Fn::Equals": [{"Ref": "Env"}, "prod"]
+    }
+    assert not conditions.is_reachable("IsDev", True)
+    assert not conditions.is_reachable("IsProd", False)
+    assert not conditions.is_reachable("IsWest", True)
+    assert conditions.is_reachable("IsWest", False)
+    # the template-level engine gives the same answers
+    assert cfn.conditions.is_always_true("IsProd")
+    assert list(cfn.conditions.build_scenarios({"IsWest": None})) == [{"IsWest": False}]
+
+
+@pytest.mark.parametrize(
+    "assertions",
+    [
+        # Env would have to be prod and dev at once
+        [
+            {"Fn::Equals": [{"Ref": "Env"}, "prod"]},
+            {"Fn::Equals": [{"Ref": "Env"}, "dev"]},
+        ],
+        [{"Fn::Equals": ["x", "y"]}],  # false whatever the parameters
+    ],
+)
+def test_rules_that_can_never_hold_are_left_out(assertions):
+    """When no parameter values pass the Rules, the context engine answers
+    about the conditions alone, as for a template without Rules: otherwise
+    every value of every condition is unreachable, including conditions on
+    parameters the Rules never mention.  The template-level engine keeps
+    answering that nothing is satisfiable, which is what stops it resolving
+    parameter values on such a template."""
+    template = {
+        "Parameters": {
+            "Env": {"Type": "String", "AllowedValues": ["prod", "dev"]},
+            "Size": {"Type": "String"},
+        },
+        "Rules": {"Never": {"Assertions": [{"Assert": a} for a in assertions]}},
+        "Conditions": {
+            "IsProd": {"Fn::Equals": [{"Ref": "Env"}, "prod"]},
+            "IsBig": {"Fn::Equals": [{"Ref": "Size"}, "big"]},
+        },
+        "Resources": {},
+    }
+    cfn = Template("", template)
+    conditions = create_context_for_template(cfn).conditions
+    for name in ("IsProd", "IsBig"):
+        for value in (True, False):
+            assert conditions.is_reachable(name, value)
+    # the same template without the Rules section gives the same clauses
+    del template["Rules"]
+    same = create_context_for_template(Template("", template)).conditions
+    assert same.cnf.data == conditions.cnf.data
+    # the template-level engine answers as it does without the fix
+    assert not cfn.conditions.satisfiable({}, {})
+    assert not cfn.conditions.satisfiable({"IsBig": True}, {"Size": "big"})
+
+
 def test_true_and_one_are_different_equals():
     """Fn::Equals [Ref P, true] and Fn::Equals [Ref P, 1] compare P with the
     strings "true" and "1", so they are two Fn::Equals with two solver
