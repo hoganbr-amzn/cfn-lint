@@ -183,6 +183,83 @@ class TestPointBudget(TestCase):
         self.assertEqual(routes, [("sat", "budget"), ("sat", "trips")])
 
 
+def wide_eval(n):
+    """One parameter Mode with n AllowedValues, Is_i = Mode == v_i, Any = Or
+    of all Is_i; topic i on Is_i with Fn::If on Any.  Every evaluation of
+    Any walks up to n disjuncts."""
+    vals = [f"v{i:04d}" for i in range(n)]
+    conds = {f"Is{i}": _eq(_ref("Mode"), vals[i]) for i in range(n)}
+    conds["Any"] = {"Fn::Or": [_cond(f"Is{i}") for i in range(n)]}
+    return {
+        "Parameters": {
+            "Mode": {"Type": "String", "Default": vals[0], "AllowedValues": vals}
+        },
+        "Conditions": conds,
+        "Resources": {
+            f"T{i}": {
+                "Type": "AWS::SNS::Topic",
+                "Condition": f"Is{i}",
+                "Properties": {"TopicName": {"Fn::If": ["Any", f"t{i}-a", f"t{i}-b"]}},
+            }
+            for i in range(n)
+        },
+    }
+
+
+class TestWorkIsNodeEvaluations(TestCase):
+    """W1 P2: the budget counts node evaluations, so a step that walks a wide
+    condition costs what it really costs, and a pinned-true "Ref == literal"
+    fixes its reference instead of being searched for."""
+
+    def setUp(self):
+        if points.ENGINE not in ("hybrid", "pp"):
+            self.skipTest("point engine not selected")
+        self._budget = points.STEP_BUDGET
+
+    def tearDown(self):
+        points.STEP_BUDGET = self._budget
+
+    @staticmethod
+    def _ask(cfn, pins):
+        return cfn.conditions._solver.satisfiable(
+            [(cfn.conditions._solver_params[n], v) for n, v in pins]
+        )
+
+    def test_wide_or_charges_its_width(self):
+        n = 64
+        points.STEP_BUDGET = 300
+        cfn = Template("", wide_eval(n), ["us-east-1"])
+        solver = cfn.conditions._solver
+        fallbacks = points._STATS["fallbacks"]
+        # Any false and Is3 false: the search tries Mode's 64 values in
+        # order and evaluates the 64-wide Or at each (short-circuiting at the
+        # k-th disjunct for the k-th value), far more node evaluations than
+        # steps; the budget trips and SAT gives the right answer
+        self.assertFalse(self._ask(cfn, [("Any", False), ("Is3", False)]))
+        self.assertEqual(points._STATS["fallbacks"], fallbacks + 1)
+        self.assertGreater(solver._work, 300)
+
+    def test_pinned_literal_equals_fixes_its_reference(self):
+        n = 64
+        cfn = Template("", wide_eval(n), ["us-east-1"])
+        solver = cfn.conditions._solver
+        self.assertTrue(self._ask(cfn, [("Is5", True), ("Any", True)]))
+        before = solver._work
+        self.assertFalse(self._ask(cfn, [("Is6", True), ("Any", False)]))
+        self.assertTrue(self._ask(cfn, [("Is7", True), ("Is8", False)]))
+        self.assertFalse(self._ask(cfn, [("Is7", True), ("Is8", True)]))
+        # three questions over a 64-value parameter, each answered without
+        # walking its values: a few node evaluations each, not 64 steps
+        self.assertLess(solver._work - before, 3 * n)
+
+    def test_literal_outside_allowed_values_is_impossible(self):
+        template = wide_eval(4)
+        template["Conditions"]["Other"] = _eq(_ref("Mode"), "nope")
+        cfn = Template("", template, ["us-east-1"])
+        self.assertFalse(self._ask(cfn, [("Other", True)]))
+        self.assertTrue(self._ask(cfn, [("Other", False), ("Is1", True)]))
+
+
 class TestRefVsRefExclusion(TestCase):
     """W1 A1/A2: a Ref-vs-Ref Fn::Equals is not exclusive with a literal
     Fn::Equals on the same parameter, so the CNF must not say NAND(P == Q,

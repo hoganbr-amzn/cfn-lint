@@ -61,6 +61,9 @@ if ENGINE not in ("hybrid", "pp", "pyinc", "g", "dual"):
 # enumerated by satisfiability checks on prefixes
 ENUM_MAX = int(os.environ.get("CFNLINT_PP_ENUM_MAX", "4096"))
 MAX_POINTS = int(os.environ.get("CFNLINT_PP_MAX_POINTS", "1048576"))
+# node evaluations one point search may spend (about 0.05 s) before SAT
+# answers; the largest search on the study's 765 non-adversarial templates
+# is 5,412
 STEP_BUDGET = int(os.environ.get("CFNLINT_PP_BUDGET", "200000"))
 # after this many searches ran out of budget, the rest of the lint is SAT
 MAX_TRIPS = int(os.environ.get("CFNLINT_PP_MAX_TRIPS", "10"))
@@ -72,6 +75,7 @@ _STATS: dict[str, Any] = {
     "sat_queries": 0,
     "fallbacks": 0,
     "pp_steps": 0,
+    "pp_max": 0,
     "components": [],
     "disagree": 0,
     "disagree_samples": [],
@@ -237,6 +241,7 @@ class PointSolver:
         self._built = False
         self._global: bool | None = None
         self._trips = 0  # point searches that ran out of budget
+        self._work = 0  # node evaluations so far, the unit of the budget
         self._dual = PinSolver(cnf) if ENGINE == "dual" else None
 
     # ----- construction
@@ -247,6 +252,7 @@ class PointSolver:
         self._nodes: dict[Any, tuple] = {}
         for sym, expr in m.defs.items():
             self._nodes[sym] = _compile(expr, m.atoms, m.defs, m.free_atoms, unknown)
+        self._size_defs()
         cons = [
             _compile(e, m.atoms, m.defs, m.free_atoms, unknown) for e in m.constraints
         ]
@@ -531,6 +537,7 @@ class PointSolver:
 
     # three-valued evaluation over a partial assignment
     def _eval(self, node, vals, memo):
+        self._work += 1
         op = node[0]
         if op == "c":
             return node[1]
@@ -597,20 +604,47 @@ class PointSolver:
             items.append((node, True))
         if not items:
             return True
+        # A reader's items are evaluated until one fails, so put the cheap
+        # ones first: a wide Or is only evaluated at the values that pass
+        # the atoms pinned next to it.
+        items.sort(key=lambda item: self._node_size(item[0]))
+        # A pinned-true "Ref == literal" fixes its reference outright, so the
+        # search never walks that reference's candidates (a parameter with
+        # a thousand AllowedValues is a thousand steps per question).
+        vals: dict[Any, Any] = {}
+        for node, exp in items:
+            if exp is not True:
+                continue
+            if node[0] == "d":
+                node = self._nodes[node[1]]
+            if node[0] != "a":
+                continue
+            l, r = self._atom_terms[node[1]]
+            if l[0] == "R" and r[0] == "L":
+                ref, literal = l[1], r[1]
+            elif l[0] == "L" and r[0] == "R":
+                ref, literal = r[1], l[1]
+            else:
+                continue
+            if literal not in self._cand[ref] or vals.setdefault(ref, literal) != literal:
+                return False
         deps = [self._item_deps(n) for n, _ in items]
-        refs = sorted({r for d in deps for r in d}, key=repr)
+        refs = sorted({r for d in deps for r in d if r not in vals}, key=repr)
         count = {r: 0 for r in refs}
         for d in deps:
             for r in d:
-                count[r] += 1
+                if r not in vals:
+                    count[r] += 1
         refs.sort(key=lambda r: (len(self._cand[r]) > 1, -count[r]))
         readers: dict[Any, list[int]] = {r: [] for r in refs}
         for i, d in enumerate(deps):
             for r in d:
-                readers[r].append(i)
-        vals: dict[Any, Any] = {}
+                if r not in vals:
+                    readers[r].append(i)
         status = [None] * len(items)
         undecided = 0
+        start = self._work
+        limit = start + STEP_BUDGET
         for i, (node, exp) in enumerate(items):
             v = self._eval(node, vals, {})
             if v is None:
@@ -618,9 +652,8 @@ class PointSolver:
             elif v != exp:
                 return False
             status[i] = v
-        if undecided == 0:
-            return True
-        steps = [0]
+        if undecided == 0 or not refs:
+            return undecided == 0
         cand = self._cand
         n = len(refs)
 
@@ -628,10 +661,6 @@ class PointSolver:
             r = refs[depth]
             idxs = readers[r]
             for value in cand[r]:
-                steps[0] += 1 + len(idxs)
-                if steps[0] > STEP_BUDGET:
-                    _STATS["pp_steps"] += steps[0]
-                    raise _Budget()
                 vals[r] = value
                 changed = []
                 ok = True
@@ -649,6 +678,11 @@ class PointSolver:
                     status[i] = v
                     changed.append(i)
                     und -= 1
+                # the budget is in node evaluations, so a step that walks a
+                # wide condition costs what it really costs
+                if self._work > limit:
+                    _STATS["pp_steps"] += self._work - start
+                    raise _Budget()
                 if ok:
                     if und == 0:
                         for i in changed:
@@ -666,9 +700,47 @@ class PointSolver:
             return False
 
         res = descend(0, undecided)
-        _STATS["pp_steps"] += steps[0]
+        _STATS["pp_steps"] += self._work - start
+        if self._work - start > _STATS["pp_max"]:
+            _STATS["pp_max"] = self._work - start
         return res
 
+    def _node_size(self, node) -> int:
+        """Node evaluations one evaluation of ``node`` can cost at most: its
+        own nodes plus those of each definition it reads (``_def_size``)."""
+        op = node[0]
+        if op == "d":
+            return self._def_size.get(node[1], 1)
+        if op == "not":
+            return 1 + self._node_size(node[1])
+        if op in ("and", "or"):
+            return 1 + sum(self._node_size(ch) for ch in node[1])
+        return 1
+
+    def _size_defs(self) -> None:
+        """``_def_size`` for every definition, children first, without
+        recursing along Condition: references (a chain can be long)."""
+        self._def_size = {}
+        visiting: set = set()
+        for root in self._nodes:
+            stack = [(root, False)]
+            while stack:
+                sym, ready = stack.pop()
+                if sym in self._def_size:
+                    continue
+                if ready:
+                    visiting.discard(sym)
+                    self._def_size[sym] = 1 + self._node_size(self._nodes[sym])
+                    continue
+                if sym in visiting:
+                    continue  # a cycle: sized as read
+                visiting.add(sym)
+                stack.append((sym, True))
+                reads: set = set()
+                _symbols(self._nodes[sym], reads)
+                for other in reads:
+                    if other in self._nodes and other not in self._def_size:
+                        stack.append((other, False))
 
     # ----- scenario enumeration (Z-review D4)
     def _node_of(self, sym) -> tuple:
