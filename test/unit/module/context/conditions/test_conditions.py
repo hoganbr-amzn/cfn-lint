@@ -565,7 +565,7 @@ def test_each_set_of_pins_is_solved_once():
     base = create_context_for_template(cfn).conditions
 
     with patch(
-        "cfnlint.context.conditions._conditions.satisfiable", wraps=satisfiable
+        "cfnlint.conditions._solver.satisfiable", wraps=satisfiable
     ) as solver:
         first = base.evolve({"IsUsEast1": True})
         base.evolve({"IsUsEast1": True})
@@ -656,7 +656,7 @@ def test_solver_calls_do_not_grow_with_reused_conditions():
     calls = []
     for alarms in (5, 20):
         with patch(
-            "cfnlint.context.conditions._conditions.satisfiable", wraps=satisfiable
+            "cfnlint.conditions._solver.satisfiable", wraps=satisfiable
         ) as solver:
             matches = lint(
                 json.dumps(_alarms_reusing_conditions(alarms)),

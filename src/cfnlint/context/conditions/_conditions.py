@@ -11,8 +11,8 @@ from typing import TYPE_CHECKING, Any, Iterator
 
 from sympy import Not, Or, Symbol
 from sympy.assumptions.cnf import EncodedCNF
-from sympy.logic.inference import satisfiable
 
+from cfnlint.conditions._solver import PinSolver
 from cfnlint.conditions._utils import add_at_most_one, add_equivalence, get_hash
 from cfnlint.context.conditions._condition import Condition, ConditionMemo
 from cfnlint.context.conditions._equals import Equal
@@ -46,10 +46,10 @@ class Conditions:
     _condition_symbols: dict[str, Symbol] = field(
         init=True, default_factory=dict, compare=False
     )
-    # Whether a set of pins is satisfiable.  The answer holds only for this
-    # _base_cnf, so pass the dict on only together with it (evolve does).
-    _satisfiable: dict[frozenset[tuple[str, bool]], bool] = field(
-        init=True, default_factory=dict, compare=False, repr=False
+    # Answers whether a set of pins is satisfiable, once per set.  It holds
+    # _base_cnf, so pass it on only together with it (evolve does).
+    _solver: PinSolver | None = field(
+        init=True, default=None, compare=False, repr=False
     )
     _max_scenarios: int = field(init=False, default=128)
 
@@ -71,9 +71,11 @@ class Conditions:
         return cnf
 
     def _is_satisfiable(self, pins: frozenset[tuple[str, bool]]) -> bool:
-        if pins not in self._satisfiable:
-            self._satisfiable[pins] = bool(satisfiable(self._cnf_with(pins)))
-        return self._satisfiable[pins]
+        if self._solver is None:
+            object.__setattr__(self, "_solver", PinSolver(self._base_cnf))
+        return self._solver.satisfiable(
+            (self._condition_symbols[name], value) for name, value in pins
+        )
 
     @classmethod
     def create_from_instance(
@@ -172,6 +174,7 @@ class Conditions:
             conditions=obj,
             _base_cnf=cnf,
             _condition_symbols=condition_symbols,
+            _solver=PinSolver(cnf),
         )
 
     def evolve(self, status: dict[str, bool], assumed: bool = False) -> "Conditions":
@@ -235,7 +238,7 @@ class Conditions:
             _pins=new_pins,
             _hard_pins=frozenset(hard_pins),
             _condition_symbols=self._condition_symbols,
-            _satisfiable=self._satisfiable,
+            _solver=self._solver,
         )
 
     def is_reachable(self, name: str, value: bool) -> bool:
