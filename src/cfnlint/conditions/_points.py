@@ -68,6 +68,9 @@ STEP_BUDGET = int(os.environ.get("CFNLINT_PP_BUDGET", "200000"))
 # after this many searches ran out of budget, the rest of the lint is SAT
 MAX_TRIPS = int(os.environ.get("CFNLINT_PP_MAX_TRIPS", "10"))
 MAX_REFS = 400  # recursion depth guard
+# definitions evaluated recursively along Condition: references before the
+# evaluation switches to an explicit stack
+EVAL_DEPTH = 64
 # node evaluations a large component may spend projecting the points its
 # scenario questions read before those questions go prefix by prefix
 PROJ_BUDGET = STEP_BUDGET * 10
@@ -254,6 +257,7 @@ class PointSolver:
         self._global: bool | None = None
         self._trips = 0  # point searches that ran out of budget
         self._work = 0  # node evaluations so far, the unit of the budget
+        self._depth = 0  # definitions being evaluated along Condition: refs
         self._dual = PinSolver(cnf) if ENGINE == "dual" else None
 
     # ----- construction
@@ -264,6 +268,12 @@ class PointSolver:
         self._nodes: dict[Any, tuple] = {}
         for sym, expr in m.defs.items():
             self._nodes[sym] = _compile(expr, m.atoms, m.defs, m.free_atoms, unknown)
+        # the definitions each definition reads directly (Condition: refs)
+        self._def_reads: dict[Any, list] = {}
+        for sym, node in self._nodes.items():
+            reads: set = set()
+            _symbols(node, reads)
+            self._def_reads[sym] = [d for d in reads if d in self._nodes]
         self._size_defs()
         cons = [
             _compile(e, m.atoms, m.defs, m.free_atoms, unknown) for e in m.constraints
@@ -331,10 +341,7 @@ class PointSolver:
         self._components = list(comps.values())
 
         # dependencies of each def (refs read, through other defs), cycles
-        self._deps: dict[Any, frozenset] = {}
-        self._cyclic: set = set()
-        for sym in self._nodes:
-            self._def_deps(sym, [])
+        self._def_deps()
 
         encoding = self._cnf.encoding
         self._pin._split() if self._pin._components is None else None
@@ -359,23 +366,42 @@ class PointSolver:
             )
         self._unclaimed = set(range(len(self._pin._components))) - claimed
 
-    def _def_deps(self, sym, stack) -> frozenset:
-        if sym in self._deps:
-            return self._deps[sym]
-        if sym in stack:
-            for s in stack[stack.index(sym) :]:
-                self._cyclic.add(s)
-            return frozenset()
-        stack.append(sym)
-        out: set = set()
-        self._node_deps(self._nodes[sym], out, stack)
-        stack.pop()
-        res = frozenset(out)
-        if sym not in self._cyclic:
-            self._deps[sym] = res
-        return res
+    def _def_deps(self) -> None:
+        """``_deps``: the references each definition reads, through the
+        definitions it references; ``_cyclic``: the definitions on a
+        condition-reference cycle.  Iterative, so a long Condition: chain
+        does not exhaust the interpreter's recursion limit."""
+        self._deps = {}
+        self._cyclic = set()
+        colour: dict[Any, int] = {}  # 1 on the current path, 2 done
+        for root in self._nodes:
+            if root in colour:
+                continue
+            path: list = []
+            stack = [(root, False)]
+            while stack:
+                sym, ready = stack.pop()
+                if ready:
+                    path.pop()
+                    out: set = set()
+                    self._node_deps(self._nodes[sym], out)
+                    self._deps[sym] = frozenset(out)
+                    colour[sym] = 2
+                    continue
+                state = colour.get(sym, 0)
+                if state == 2:
+                    continue
+                if state == 1:
+                    self._cyclic.update(path[path.index(sym) :])
+                    continue
+                colour[sym] = 1
+                path.append(sym)
+                stack.append((sym, True))
+                for other in self._def_reads[sym]:
+                    if colour.get(other, 0) != 2:
+                        stack.append((other, False))
 
-    def _node_deps(self, node, out, stack) -> None:
+    def _node_deps(self, node, out) -> None:
         op = node[0]
         if op == "a":
             for t in self._atom_terms[node[1]]:
@@ -384,16 +410,18 @@ class PointSolver:
         elif op == "f":
             out.add(("free", node[1]))
         elif op == "d":
-            out |= self._def_deps(node[1], stack)
+            # computed before any definition that reads it, except on a
+            # cycle, whose component is routed to SAT
+            out |= self._deps.get(node[1], frozenset())
         elif op == "not":
-            self._node_deps(node[1], out, stack)
+            self._node_deps(node[1], out)
         elif op in ("and", "or"):
             for ch in node[1]:
-                self._node_deps(ch, out, stack)
+                self._node_deps(ch, out)
 
     def _item_deps(self, node) -> frozenset:
         out: set = set()
-        self._node_deps(node, out, [])
+        self._node_deps(node, out)
         return frozenset(out)
 
     def _candidates(self, c: _Component) -> None:
@@ -585,7 +613,13 @@ class PointSolver:
             if sym in memo:
                 return memo[sym]
             memo[sym] = None  # cycle guard (cyclic components never get here)
+            if self._depth >= EVAL_DEPTH:
+                # a long Condition: chain: settle what this definition reads,
+                # deepest first, without recursing along the chain
+                self._eval_defs(sym, vals, memo)
+            self._depth += 1
             v = self._eval(self._nodes[sym], vals, memo)
+            self._depth -= 1
             memo[sym] = v
             return v
         if op == "not":
@@ -610,6 +644,23 @@ class PointSolver:
                     res = None
             return res
         raise ValueError(op)
+
+    def _eval_defs(self, root, vals, memo) -> None:
+        """Memoise every definition ``root`` reads, directly or through
+        other definitions, children first, by an explicit stack."""
+        stack = [(d, False) for d in self._def_reads[root] if d not in memo]
+        while stack:
+            sym, ready = stack.pop()
+            if ready:
+                memo[sym] = self._eval(self._nodes[sym], vals, memo)
+                continue
+            if sym in memo:
+                continue
+            memo[sym] = None
+            stack.append((sym, True))
+            for other in self._def_reads[sym]:
+                if other not in memo:
+                    stack.append((other, False))
 
     def _points(self, c: _Component, pins: list) -> bool:
         items = []  # (node, expected)
@@ -756,10 +807,8 @@ class PointSolver:
                     continue  # a cycle: sized as read
                 visiting.add(sym)
                 stack.append((sym, True))
-                reads: set = set()
-                _symbols(self._nodes[sym], reads)
-                for other in reads:
-                    if other in self._nodes and other not in self._def_size:
+                for other in self._def_reads[sym]:
+                    if other not in self._def_size:
                         stack.append((other, False))
 
     # ----- scenario enumeration (Z-review D4)

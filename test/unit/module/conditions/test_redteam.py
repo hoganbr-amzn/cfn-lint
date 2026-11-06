@@ -372,6 +372,80 @@ class TestScenarioProjection(TestCase):
         self.assertEqual(component.projected, projected)
 
 
+def cond_chain_narrow(n, k=8):
+    """n conditions chained through Condition: over k parameters (routed to
+    points): C_i = And(C_{i-1}, P == a) or Or(C_{i-1}, P == b) alternately."""
+    conds = {"C0": _eq(_ref("P0"), "a")}
+    for i in range(1, n):
+        if i % 2:
+            conds[f"C{i}"] = {"Fn::And": [_cond(f"C{i-1}"), _eq(_ref(f"P{i % k}"), "a")]}
+        else:
+            conds[f"C{i}"] = {"Fn::Or": [_cond(f"C{i-1}"), _eq(_ref(f"P{i % k}"), "b")]}
+    return {
+        "Parameters": {f"P{i}": {"Type": "String"} for i in range(k)},
+        "Conditions": conds,
+        "Resources": {
+            "T": {
+                "Type": "AWS::SNS::Topic",
+                "Condition": f"C{n - 1}",
+                "Properties": {"TopicName": {"Fn::If": ["C0", "a", "b"]}},
+            }
+        },
+    }
+
+
+class TestLongConditionChain(TestCase):
+    """W1 P4: evaluating a Condition: chain longer than the interpreter's
+    recursion limit must not raise, in the point engine or in dependency
+    analysis."""
+
+    def test_chain_of_two_thousand_conditions_is_answered(self):
+        n = 2000
+        cfn = Template("", cond_chain_narrow(n), ["us-east-1"])
+        legacy = cfn.conditions
+        last = f"C{n - 1}"
+        reference = PinSolver(legacy._cnf, incremental=True)
+        pins = [(legacy._solver_params[last], True)]
+        free = [legacy._solver_params["C0"]]
+        self.assertEqual(
+            legacy._solver.models(pins, free, 128), reference.models(pins, free, 128)
+        )
+        self.assertEqual(
+            list(legacy.build_scenarios({last: {True}, "C0": {True, False}})),
+            [{"C0": True, last: True}, {"C0": False, last: True}],
+        )
+        self.assertFalse(legacy.check_implies({last: True}, "C0"))
+        self.assertTrue(legacy.check_implies({"C0": False}, f"C{n - 2}") is False)
+        # the context engine's questions walk the same chain
+        ctx = cfn.context.conditions.evolve({last: True})
+        self.assertTrue(ctx.is_reachable("C0", True))
+        self.assertTrue(ctx.is_reachable("C0", False))
+
+    def test_condition_reference_cycle_is_still_detected(self):
+        if points.ENGINE not in ("hybrid", "pp"):
+            self.skipTest("point engine not selected")
+        cfn = Template(
+            "",
+            {
+                "Parameters": {"P": {"Type": "String"}},
+                "Conditions": {
+                    "E": _eq(_ref("P"), "a"),
+                    "A": {"Fn::Or": [_cond("B"), _cond("E")]},
+                    "B": {"Fn::And": [_cond("A"), {"Fn::Not": [_cond("E")]}]},
+                },
+            },
+            ["us-east-1"],
+        )
+        # the legacy engine drops a cyclic condition when it builds it; the
+        # context engine keeps it and its solver must route it to SAT
+        self.assertEqual(sorted(cfn.conditions._conditions), ["E"])
+        solver = cfn.context.conditions._solver
+        self.assertTrue(solver.satisfiable([]))
+        routes = sorted((c.route, c.why) for c in solver._components)
+        self.assertEqual(routes, [("pp", ""), ("sat", "cycle")])
+        self.assertEqual(len(solver._cyclic), 2)
+
+
 class TestRefVsRefExclusion(TestCase):
     """W1 A1/A2: a Ref-vs-Ref Fn::Equals is not exclusive with a literal
     Fn::Equals on the same parameter, so the CNF must not say NAND(P == Q,
